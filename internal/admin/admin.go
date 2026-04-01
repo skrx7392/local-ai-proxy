@@ -22,9 +22,9 @@ type handler struct {
 	usageCh  chan<- store.UsageEntry
 
 	// Admin rate limiter: 10 req/min, single bucket
-	rlMu       sync.Mutex
-	rlTokens   float64
-	rlLast     time.Time
+	rlMu     sync.Mutex
+	rlTokens float64
+	rlLast   time.Time
 }
 
 type createKeyRequest struct {
