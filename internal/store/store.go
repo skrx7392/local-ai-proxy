@@ -24,24 +24,24 @@ type APIKey struct {
 }
 
 type UsageEntry struct {
-	APIKeyID        int64
-	Model           string
-	PromptTokens    int
+	APIKeyID         int64
+	Model            string
+	PromptTokens     int
 	CompletionTokens int
-	TotalTokens     int
-	DurationMs      int64
-	Status          string // completed | partial | error
+	TotalTokens      int
+	DurationMs       int64
+	Status           string // completed | partial | error
 }
 
 type UsageStat struct {
-	APIKeyID         int64
-	KeyName          string
-	Model            string
-	TotalRequests    int
-	TotalPrompt      int
-	TotalCompletion  int
-	TotalTokens      int
-	Status           string
+	APIKeyID        int64
+	KeyName         string
+	Model           string
+	TotalRequests   int
+	TotalPrompt     int
+	TotalCompletion int
+	TotalTokens     int
+	Status          string
 }
 
 func New(dbPath string) (*Store, error) {
