@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-proxy-ingress
+  namespace: local-ai
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Disable response buffering for SSE streaming
+    traefik.ingress.kubernetes.io/buffering-retries: "0"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - ai.kinvee.in
+      secretName: ai-proxy-tls
+  rules:
+    - host: ai.kinvee.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-proxy
+                port:
+                  number: 80

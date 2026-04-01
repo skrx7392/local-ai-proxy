@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-proxy
+  namespace: local-ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-proxy
+  template:
+    metadata:
+      labels:
+        app: ai-proxy
+    spec:
+      containers:
+        - name: ai-proxy
+          image: local-ai-proxy:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: OLLAMA_URL
+              value: "http://ollama.aarogya.svc.cluster.local:11434"
+            - name: DB_PATH
+              value: "/data/proxy.db"
+            - name: CORS_ORIGINS
+              value: "*"
+            - name: ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: proxy-secret
+                  key: ADMIN_KEY
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: proxy-data

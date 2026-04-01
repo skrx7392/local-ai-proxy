@@ -1,0 +1,19 @@
+# Binary
+proxy
+*.exe
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Go
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
