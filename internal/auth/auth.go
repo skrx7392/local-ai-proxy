@@ -45,6 +45,12 @@ func KeyFromContext(ctx context.Context) *store.APIKey {
 	return key
 }
 
+// WithKey returns a new context that carries the given API key.
+// This is intended for testing and internal use.
+func WithKey(ctx context.Context, key *store.APIKey) context.Context {
+	return context.WithValue(ctx, contextKey{}, key)
+}
+
 // HashKey computes the SHA-256 hash of a raw API key. Exported for use by admin.
 func HashKey(raw string) string {
 	return hashKey(raw)
