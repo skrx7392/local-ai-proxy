@@ -24,8 +24,11 @@ spec:
               value: "8080"
             - name: OLLAMA_URL
               value: "http://ollama.aarogya.svc.cluster.local:11434"
-            - name: DB_PATH
-              value: "/data/proxy.db"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: proxy-secret
+                  key: DATABASE_URL
             - name: CORS_ORIGINS
               value: "*"
             - name: ADMIN_KEY
@@ -33,9 +36,6 @@ spec:
                 secretKeyRef:
                   name: proxy-secret
                   key: ADMIN_KEY
-          volumeMounts:
-            - name: data
-              mountPath: /data
           livenessProbe:
             httpGet:
               path: /healthz
@@ -55,7 +55,3 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "200m"
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: proxy-data

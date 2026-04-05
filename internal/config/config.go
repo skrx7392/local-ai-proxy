@@ -9,7 +9,7 @@ import (
 type Config struct {
 	OllamaURL      string
 	AdminKey       string
-	DBPath         string
+	DatabaseURL    string
 	Port           string
 	CORSOrigins    string
 	MaxRequestBody int64
@@ -19,6 +19,11 @@ func Load() (Config, error) {
 	adminKey := os.Getenv("ADMIN_KEY")
 	if adminKey == "" {
 		return Config{}, fmt.Errorf("ADMIN_KEY environment variable is required")
+	}
+
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		return Config{}, fmt.Errorf("DATABASE_URL environment variable is required")
 	}
 
 	maxBody := int64(52428800) // 50MB
@@ -33,7 +38,7 @@ func Load() (Config, error) {
 	return Config{
 		OllamaURL:      envOrDefault("OLLAMA_URL", "http://localhost:11434"),
 		AdminKey:       adminKey,
-		DBPath:         envOrDefault("DB_PATH", "./proxy.db"),
+		DatabaseURL:    databaseURL,
 		Port:           envOrDefault("PORT", "8080"),
 		CORSOrigins:    envOrDefault("CORS_ORIGINS", "*"),
 		MaxRequestBody: maxBody,
