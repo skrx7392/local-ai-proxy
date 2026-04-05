@@ -23,7 +23,7 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	db, err := store.New(cfg.DBPath)
+	db, err := store.New(context.Background(), cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
