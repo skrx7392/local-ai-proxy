@@ -62,14 +62,14 @@ func New(dbPath string) (*Store, error) {
 	writeDB.SetMaxOpenConns(1)
 	writeDB.SetMaxIdleConns(1)
 
-	s := &Store{readDB: readDB, writeDB: writeDB}
-	if err := s.migrate(); err != nil {
+	dataStore := &Store{readDB: readDB, writeDB: writeDB}
+	if err := dataStore.migrate(); err != nil {
 		readDB.Close()
 		writeDB.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
-	return s, nil
+	return dataStore, nil
 }
 
 func (s *Store) Close() error {
@@ -104,8 +104,8 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_created ON usage_logs(created_at)`,
 	}
 
-	for _, m := range migrations {
-		if _, err := s.writeDB.Exec(m); err != nil {
+	for _, migration := range migrations {
+		if _, err := s.writeDB.Exec(migration); err != nil {
 			return fmt.Errorf("exec migration: %w", err)
 		}
 	}
@@ -126,20 +126,20 @@ func (s *Store) CreateKey(name, keyHash, keyPrefix string, rateLimit int) (int64
 
 // GetKeyByHash looks up an active (non-revoked) key by its SHA-256 hash.
 func (s *Store) GetKeyByHash(hash string) (*APIKey, error) {
-	var k APIKey
+	var apiKey APIKey
 	var revoked int
 	err := s.readDB.QueryRow(
 		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked
 		 FROM api_keys WHERE key_hash = ? AND revoked = 0`, hash,
-	).Scan(&k.ID, &k.Name, &k.KeyHash, &k.KeyPrefix, &k.RateLimit, &k.CreatedAt, &revoked)
+	).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &revoked)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	k.Revoked = revoked != 0
-	return &k, nil
+	apiKey.Revoked = revoked != 0
+	return &apiKey, nil
 }
 
 // ListKeys returns all API keys (for admin display).
@@ -154,13 +154,13 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 
 	var keys []APIKey
 	for rows.Next() {
-		var k APIKey
+		var apiKey APIKey
 		var revoked int
-		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &k.RateLimit, &k.CreatedAt, &revoked); err != nil {
+		if err := rows.Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &revoked); err != nil {
 			return nil, err
 		}
-		k.Revoked = revoked != 0
-		keys = append(keys, k)
+		apiKey.Revoked = revoked != 0
+		keys = append(keys, apiKey)
 	}
 	return keys, rows.Err()
 }
@@ -171,8 +171,8 @@ func (s *Store) RevokeKey(id int64) error {
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
 		return fmt.Errorf("key not found")
 	}
 	return nil
@@ -216,12 +216,12 @@ func (s *Store) GetUsageStats(keyID *int64, since *time.Time) ([]UsageStat, erro
 
 	var stats []UsageStat
 	for rows.Next() {
-		var st UsageStat
-		if err := rows.Scan(&st.APIKeyID, &st.KeyName, &st.Model, &st.TotalRequests,
-			&st.TotalPrompt, &st.TotalCompletion, &st.TotalTokens, &st.Status); err != nil {
+		var usageStat UsageStat
+		if err := rows.Scan(&usageStat.APIKeyID, &usageStat.KeyName, &usageStat.Model, &usageStat.TotalRequests,
+			&usageStat.TotalPrompt, &usageStat.TotalCompletion, &usageStat.TotalTokens, &usageStat.Status); err != nil {
 			return nil, err
 		}
-		stats = append(stats, st)
+		stats = append(stats, usageStat)
 	}
 	return stats, rows.Err()
 }

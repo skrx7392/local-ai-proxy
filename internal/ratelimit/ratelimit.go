@@ -25,7 +25,7 @@ type Limiter struct {
 }
 
 func New() *Limiter {
-	l := &Limiter{
+	limiter := &Limiter{
 		buckets: make(map[int64]*bucket),
 	}
 	// Prune stale buckets every minute
@@ -33,10 +33,10 @@ func New() *Limiter {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			l.prune()
+			limiter.prune()
 		}
 	}()
-	return l
+	return limiter
 }
 
 // Allow checks if a request is allowed for the given key ID and rate limit.
@@ -46,37 +46,37 @@ func (l *Limiter) Allow(keyID int64, rateLimit int) (bool, float64) {
 	defer l.mu.Unlock()
 
 	now := time.Now()
-	b, exists := l.buckets[keyID]
+	tokenBucket, exists := l.buckets[keyID]
 
 	if !exists {
-		b = &bucket{
+		tokenBucket = &bucket{
 			tokens:     float64(rateLimit) - 1, // consume one token now
 			capacity:   float64(rateLimit),
 			refillRate: float64(rateLimit) / 60.0,
 			lastRefill: now,
 			lastAccess: now,
 		}
-		l.buckets[keyID] = b
+		l.buckets[keyID] = tokenBucket
 		return true, 0
 	}
 
 	// Update capacity/refill if rate limit changed
-	b.capacity = float64(rateLimit)
-	b.refillRate = float64(rateLimit) / 60.0
+	tokenBucket.capacity = float64(rateLimit)
+	tokenBucket.refillRate = float64(rateLimit) / 60.0
 
 	// Refill tokens based on elapsed time
-	elapsed := now.Sub(b.lastRefill).Seconds()
-	b.tokens = math.Min(b.capacity, b.tokens+elapsed*b.refillRate)
-	b.lastRefill = now
-	b.lastAccess = now
+	elapsed := now.Sub(tokenBucket.lastRefill).Seconds()
+	tokenBucket.tokens = math.Min(tokenBucket.capacity, tokenBucket.tokens+elapsed*tokenBucket.refillRate)
+	tokenBucket.lastRefill = now
+	tokenBucket.lastAccess = now
 
-	if b.tokens >= 1 {
-		b.tokens--
+	if tokenBucket.tokens >= 1 {
+		tokenBucket.tokens--
 		return true, 0
 	}
 
 	// Calculate retry-after: time until 1 token is available
-	retryAfter := (1 - b.tokens) / b.refillRate
+	retryAfter := (1 - tokenBucket.tokens) / tokenBucket.refillRate
 	return false, retryAfter
 }
 
@@ -84,9 +84,9 @@ func (l *Limiter) prune() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cutoff := time.Now().Add(-10 * time.Minute)
-	for id, b := range l.buckets {
-		if b.lastAccess.Before(cutoff) {
-			delete(l.buckets, id)
+	for keyID, tokenBucket := range l.buckets {
+		if tokenBucket.lastAccess.Before(cutoff) {
+			delete(l.buckets, keyID)
 		}
 	}
 }

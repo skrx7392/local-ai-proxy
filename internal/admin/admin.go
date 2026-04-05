@@ -22,9 +22,9 @@ type handler struct {
 	usageCh  chan<- store.UsageEntry
 
 	// Admin rate limiter: 10 req/min, single bucket
-	rlMu     sync.Mutex
-	rlTokens float64
-	rlLast   time.Time
+	rateLimitMu       sync.Mutex
+	rateLimitTokens   float64
+	rateLimitLastTime time.Time
 }
 
 type createKeyRequest struct {
@@ -49,22 +49,22 @@ type keyResponse struct {
 	Revoked   bool      `json:"revoked"`
 }
 
-func NewHandler(s *store.Store, adminKey string, usageCh chan<- store.UsageEntry) http.Handler {
-	h := &handler{
-		store:    s,
-		adminKey: adminKey,
-		usageCh:  usageCh,
-		rlTokens: 10,
-		rlLast:   time.Now(),
+func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.UsageEntry) http.Handler {
+	handler := &handler{
+		store:             dataStore,
+		adminKey:          adminKey,
+		usageCh:           usageCh,
+		rateLimitTokens:   10,
+		rateLimitLastTime: time.Now(),
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /admin/keys", h.createKey)
-	mux.HandleFunc("GET /admin/keys", h.listKeys)
-	mux.HandleFunc("DELETE /admin/keys/{id}", h.revokeKey)
-	mux.HandleFunc("GET /admin/usage", h.getUsage)
+	mux.HandleFunc("POST /admin/keys", handler.createKey)
+	mux.HandleFunc("GET /admin/keys", handler.listKeys)
+	mux.HandleFunc("DELETE /admin/keys/{id}", handler.revokeKey)
+	mux.HandleFunc("GET /admin/usage", handler.getUsage)
 
-	return h.authMiddleware(mux)
+	return handler.authMiddleware(mux)
 }
 
 func (h *handler) authMiddleware(next http.Handler) http.Handler {
@@ -91,16 +91,16 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (h *handler) adminAllow() bool {
-	h.rlMu.Lock()
-	defer h.rlMu.Unlock()
+	h.rateLimitMu.Lock()
+	defer h.rateLimitMu.Unlock()
 
 	now := time.Now()
-	elapsed := now.Sub(h.rlLast).Seconds()
-	h.rlTokens = min(10, h.rlTokens+elapsed*(10.0/60.0))
-	h.rlLast = now
+	elapsed := now.Sub(h.rateLimitLastTime).Seconds()
+	h.rateLimitTokens = min(10, h.rateLimitTokens+elapsed*(10.0/60.0))
+	h.rateLimitLastTime = now
 
-	if h.rlTokens >= 1 {
-		h.rlTokens--
+	if h.rateLimitTokens >= 1 {
+		h.rateLimitTokens--
 		return true
 	}
 	return false
@@ -158,14 +158,14 @@ func (h *handler) listKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := make([]keyResponse, len(keys))
-	for i, k := range keys {
+	for i, apiKey := range keys {
 		resp[i] = keyResponse{
-			ID:        k.ID,
-			Name:      k.Name,
-			KeyPrefix: k.KeyPrefix,
-			RateLimit: k.RateLimit,
-			CreatedAt: k.CreatedAt,
-			Revoked:   k.Revoked,
+			ID:        apiKey.ID,
+			Name:      apiKey.Name,
+			KeyPrefix: apiKey.KeyPrefix,
+			RateLimit: apiKey.RateLimit,
+			CreatedAt: apiKey.CreatedAt,
+			Revoked:   apiKey.Revoked,
 		}
 	}
 
