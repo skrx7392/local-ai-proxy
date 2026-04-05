@@ -375,6 +375,98 @@ func TestAdmin_GetUsage_InvalidKeyID(t *testing.T) {
 	}
 }
 
+func TestAdmin_ListUsers(t *testing.T) {
+	h, s := setupAdminTest(t)
+
+	// Create users directly in the store
+	_, _ = s.CreateUser("admin-list1@example.com", "hash", "User One")
+	_, _ = s.CreateUser("admin-list2@example.com", "hash", "User Two")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var users []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &users); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if len(users) < 2 {
+		t.Errorf("expected at least 2 users, got %d", len(users))
+	}
+}
+
+func TestAdmin_DeactivateUser(t *testing.T) {
+	h, s := setupAdminTest(t)
+
+	id, _ := s.CreateUser("deactivate@example.com", "hash", "Deactivate Me")
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/users/"+strconv.FormatInt(id, 10)+"/deactivate", nil)
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	user, _ := s.GetUserByID(id)
+	if user.IsActive {
+		t.Error("expected user to be deactivated")
+	}
+}
+
+func TestAdmin_ActivateUser(t *testing.T) {
+	h, s := setupAdminTest(t)
+
+	id, _ := s.CreateUser("activate@example.com", "hash", "Activate Me")
+	_ = s.SetUserActive(id, false)
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/users/"+strconv.FormatInt(id, 10)+"/activate", nil)
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	user, _ := s.GetUserByID(id)
+	if !user.IsActive {
+		t.Error("expected user to be activated")
+	}
+}
+
+func TestAdmin_ActivateUser_NotFound(t *testing.T) {
+	h, _ := setupAdminTest(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/users/999999/activate", nil)
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for non-existent user, got %d", rec.Code)
+	}
+}
+
+func TestAdmin_ActivateUser_InvalidID(t *testing.T) {
+	h, _ := setupAdminTest(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/users/not-a-number/activate", nil)
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid ID, got %d", rec.Code)
+	}
+}
+
 func TestAdmin_RateLimiting(t *testing.T) {
 	h, _ := setupAdminTest(t)
 

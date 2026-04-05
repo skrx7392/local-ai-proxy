@@ -63,6 +63,9 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	mux.HandleFunc("GET /admin/keys", handler.listKeys)
 	mux.HandleFunc("DELETE /admin/keys/{id}", handler.revokeKey)
 	mux.HandleFunc("GET /admin/usage", handler.getUsage)
+	mux.HandleFunc("GET /admin/users", handler.listUsers)
+	mux.HandleFunc("PUT /admin/users/{id}/activate", handler.activateUser)
+	mux.HandleFunc("PUT /admin/users/{id}/deactivate", handler.deactivateUser)
 
 	return handler.authMiddleware(mux)
 }
@@ -230,6 +233,73 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+func (h *handler) listUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := h.store.ListUsers()
+	if err != nil {
+		log.Printf("list users error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list users")
+		return
+	}
+
+	type userResponse struct {
+		ID        int64  `json:"id"`
+		Email     string `json:"email"`
+		Name      string `json:"name"`
+		Role      string `json:"role"`
+		IsActive  bool   `json:"is_active"`
+		CreatedAt string `json:"created_at"`
+	}
+
+	resp := make([]userResponse, len(users))
+	for i, u := range users {
+		resp[i] = userResponse{
+			ID:        u.ID,
+			Email:     u.Email,
+			Name:      u.Name,
+			Role:      u.Role,
+			IsActive:  u.IsActive,
+			CreatedAt: u.CreatedAt.Format(time.RFC3339),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *handler) activateUser(w http.ResponseWriter, r *http.Request) {
+	h.setUserActiveHandler(w, r, true)
+}
+
+func (h *handler) deactivateUser(w http.ResponseWriter, r *http.Request) {
+	h.setUserActiveHandler(w, r, false)
+}
+
+func (h *handler) setUserActiveHandler(w http.ResponseWriter, r *http.Request, active bool) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid user ID")
+		return
+	}
+
+	if err := h.store.SetUserActive(id, active); err != nil {
+		if err.Error() == "user not found" {
+			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "User not found")
+			return
+		}
+		log.Printf("set user active error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update user")
+		return
+	}
+
+	status := "activated"
+	if !active {
+		status = "deactivated"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": status})
 }
 
 func min(a, b float64) float64 {

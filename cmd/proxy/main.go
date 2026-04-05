@@ -15,6 +15,7 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
 	"github.com/krishna/local-ai-proxy/internal/store"
+	"github.com/krishna/local-ai-proxy/internal/user"
 )
 
 func main() {
@@ -71,6 +72,7 @@ func main() {
 	rateLimitMiddleware := ratelimit.Middleware(limiter)
 	cors := middleware.CORS(cfg.CORSOrigins)
 	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh)
+	userHandler := user.NewHandler(db)
 
 	mux := http.NewServeMux()
 
@@ -85,6 +87,9 @@ func main() {
 
 	// Admin — no CORS
 	mux.Handle("/admin/", adminHandler)
+
+	// User API — CORS, session auth handled internally
+	mux.Handle("/api/", cors(userHandler))
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
