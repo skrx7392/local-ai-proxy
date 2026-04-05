@@ -22,3 +22,29 @@ CREATE TABLE IF NOT EXISTS usage_logs (
 
 CREATE INDEX IF NOT EXISTS idx_usage_logs_key_id ON usage_logs(api_key_id);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_created ON usage_logs(created_at);
+
+CREATE TABLE IF NOT EXISTS users (
+    id            BIGSERIAL PRIMARY KEY,
+    email         TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'user',
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES users(id),
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Add user_id to api_keys (NULL = legacy admin-created key)
+DO $$ BEGIN
+    ALTER TABLE api_keys ADD COLUMN user_id BIGINT REFERENCES users(id);
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;

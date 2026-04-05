@@ -1,0 +1,3 @@
+ALTER TABLE api_keys DROP COLUMN IF EXISTS user_id;
+DROP TABLE IF EXISTS user_sessions;
+DROP TABLE IF EXISTS users;

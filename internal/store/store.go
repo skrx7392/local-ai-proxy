@@ -25,6 +25,7 @@ type APIKey struct {
 	RateLimit int
 	CreatedAt time.Time
 	Revoked   bool
+	UserID    *int64 // nil = legacy admin-created key
 }
 
 type UsageEntry struct {
@@ -46,6 +47,25 @@ type UsageStat struct {
 	TotalCompletion int
 	TotalTokens     int
 	Status          string
+}
+
+type User struct {
+	ID           int64
+	Email        string
+	PasswordHash string
+	Name         string
+	Role         string // "user" or "admin"
+	IsActive     bool
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type Session struct {
+	ID        int64
+	UserID    int64
+	TokenHash string
+	ExpiresAt time.Time
+	CreatedAt time.Time
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
@@ -70,6 +90,11 @@ func New(ctx context.Context, databaseURL string) (*Store, error) {
 
 func (s *Store) Close() {
 	s.pool.Close()
+}
+
+// Pool returns the underlying connection pool (for test cleanup).
+func (s *Store) Pool() *pgxpool.Pool {
+	return s.pool
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -155,6 +180,206 @@ func (s *Store) LogUsage(entry UsageEntry) error {
 		entry.TotalTokens, entry.DurationMs, entry.Status,
 	)
 	return err
+}
+
+// CreateUser inserts a new user and returns their ID.
+func (s *Store) CreateUser(email, passwordHash, name string) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(
+		context.Background(),
+		`INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3) RETURNING id`,
+		email, passwordHash, name,
+	).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// GetUserByEmail looks up a user by email address.
+func (s *Store) GetUserByEmail(email string) (*User, error) {
+	var u User
+	err := s.pool.QueryRow(
+		context.Background(),
+		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at
+		 FROM users WHERE email = $1`, email,
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// GetUserByID looks up a user by ID.
+func (s *Store) GetUserByID(id int64) (*User, error) {
+	var u User
+	err := s.pool.QueryRow(
+		context.Background(),
+		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at
+		 FROM users WHERE id = $1`, id,
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// UpdateUserProfile updates a user's name and email.
+func (s *Store) UpdateUserProfile(id int64, name, email string) error {
+	ct, err := s.pool.Exec(
+		context.Background(),
+		`UPDATE users SET name = $1, email = $2, updated_at = NOW() WHERE id = $3`,
+		name, email, id,
+	)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("user not found")
+	}
+	return nil
+}
+
+// UpdateUserPassword updates a user's password hash.
+func (s *Store) UpdateUserPassword(id int64, passwordHash string) error {
+	ct, err := s.pool.Exec(
+		context.Background(),
+		`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("user not found")
+	}
+	return nil
+}
+
+// ListUsers returns all users (for admin use).
+func (s *Store) ListUsers() ([]User, error) {
+	rows, err := s.pool.Query(
+		context.Background(),
+		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at FROM users ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+// SetUserActive activates or deactivates a user.
+func (s *Store) SetUserActive(id int64, active bool) error {
+	ct, err := s.pool.Exec(
+		context.Background(),
+		`UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2`,
+		active, id,
+	)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("user not found")
+	}
+	return nil
+}
+
+// CreateSession inserts a new session record.
+func (s *Store) CreateSession(userID int64, tokenHash string, expiresAt time.Time) error {
+	_, err := s.pool.Exec(
+		context.Background(),
+		`INSERT INTO user_sessions (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+		userID, tokenHash, expiresAt,
+	)
+	return err
+}
+
+// GetSessionByTokenHash looks up a session by its token hash.
+func (s *Store) GetSessionByTokenHash(hash string) (*Session, error) {
+	var sess Session
+	err := s.pool.QueryRow(
+		context.Background(),
+		`SELECT id, user_id, token_hash, expires_at, created_at
+		 FROM user_sessions WHERE token_hash = $1`, hash,
+	).Scan(&sess.ID, &sess.UserID, &sess.TokenHash, &sess.ExpiresAt, &sess.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
+// DeleteSession removes a session by its token hash.
+func (s *Store) DeleteSession(tokenHash string) error {
+	_, err := s.pool.Exec(
+		context.Background(),
+		`DELETE FROM user_sessions WHERE token_hash = $1`, tokenHash,
+	)
+	return err
+}
+
+// DeleteUserSessions removes all sessions for a user.
+func (s *Store) DeleteUserSessions(userID int64) error {
+	_, err := s.pool.Exec(
+		context.Background(),
+		`DELETE FROM user_sessions WHERE user_id = $1`, userID,
+	)
+	return err
+}
+
+// CreateKeyForUser creates an API key owned by a user.
+func (s *Store) CreateKeyForUser(userID int64, name, keyHash, keyPrefix string, rateLimit int) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(
+		context.Background(),
+		`INSERT INTO api_keys (name, key_hash, key_prefix, rate_limit, user_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		name, keyHash, keyPrefix, rateLimit, userID,
+	).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// ListKeysByUser returns all API keys belonging to a user.
+func (s *Store) ListKeysByUser(userID int64) ([]APIKey, error) {
+	rows, err := s.pool.Query(
+		context.Background(),
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id
+		 FROM api_keys WHERE user_id = $1 ORDER BY id`, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []APIKey
+	for rows.Next() {
+		var k APIKey
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyHash, &k.KeyPrefix, &k.RateLimit, &k.CreatedAt, &k.Revoked, &k.UserID); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
 }
 
 // GetUsageStats returns aggregated usage statistics.
