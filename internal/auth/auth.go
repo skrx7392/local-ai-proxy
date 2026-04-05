@@ -51,16 +51,16 @@ func HashKey(raw string) string {
 }
 
 func hashKey(raw string) string {
-	h := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(h[:])
+	hashBytes := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(hashBytes[:])
 }
 
 func extractBearer(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
 		return ""
 	}
-	return strings.TrimPrefix(auth, "Bearer ")
+	return strings.TrimPrefix(authHeader, "Bearer ")
 }
 
 func writeAuthError(w http.ResponseWriter, message string) {

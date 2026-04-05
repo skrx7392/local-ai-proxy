@@ -46,8 +46,8 @@ func NewHandler(ollamaRawURL string, usageCh chan<- store.UsageEntry, maxBody in
 		log.Fatalf("invalid OLLAMA_URL: %v", err)
 	}
 
-	rp := httputil.NewSingleHostReverseProxy(target)
-	rp.Director = func(req *http.Request) {
+	reverseProxy := httputil.NewSingleHostReverseProxy(target)
+	reverseProxy.Director = func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
 		req.Host = target.Host
@@ -60,7 +60,7 @@ func NewHandler(ollamaRawURL string, usageCh chan<- store.UsageEntry, maxBody in
 
 	return &handler{
 		ollamaURL:    target,
-		reverseProxy: rp,
+		reverseProxy: reverseProxy,
 		client:       client,
 		usageCh:      usageCh,
 		maxBody:      maxBody,
@@ -191,9 +191,9 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 	defer resp.Body.Close()
 
 	// Copy upstream headers
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
+	for headerKey, headerValues := range resp.Header {
+		for _, headerValue := range headerValues {
+			w.Header().Add(headerKey, headerValue)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
@@ -211,11 +211,11 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 	// Raw tee passthrough with observation
 	var ud usageData
 	ud.Model = model
-	reader := bufio.NewReader(resp.Body)
+	lineReader := bufio.NewReader(resp.Body)
 	status := "completed"
 
 	for {
-		line, err := reader.ReadBytes('\n')
+		line, err := lineReader.ReadBytes('\n')
 		if len(line) > 0 {
 			w.Write(line)
 			flusher.Flush()
@@ -313,8 +313,8 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 
 // Flush implements http.Flusher for the recorder.
 func (r *responseRecorder) Flush() {
-	if f, ok := r.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
 	}
 }
 
