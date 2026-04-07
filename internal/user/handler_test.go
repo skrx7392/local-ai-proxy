@@ -553,7 +553,7 @@ func TestRevokeKey(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &created)
 
 	// Revoke it
-	req = httptest.NewRequest(http.MethodDelete, "/api/keys/"+strconv.FormatInt(created.ID, 10), nil)
+	req = httptest.NewRequest(http.MethodDelete, "/api/users/keys/"+strconv.FormatInt(created.ID, 10), nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
