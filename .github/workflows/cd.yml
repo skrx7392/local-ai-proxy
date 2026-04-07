@@ -32,6 +32,7 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DEV_SERVER_SSH_KEY }}
           ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
         run: |
           mkdir -p ~/.ssh
@@ -40,6 +41,13 @@ jobs:
 
           # Copy source to server and build Docker image there
           scp -o StrictHostKeyChecking=no -r cmd/ internal/ deploy/ go.mod sk@100.108.60.90:~/local-ai-proxy/
+
+          # Create/update k8s secret from repo secrets (runs locally via kubectl over SSH)
+          ssh -o StrictHostKeyChecking=no sk@100.108.60.90 "export KUBECONFIG=/home/sk/.kube/config && \
+            sudo kubectl -n local-ai create secret generic proxy-secret \
+              --from-literal=ADMIN_KEY='${ADMIN_KEY}' \
+              --from-literal=DATABASE_URL='${DATABASE_URL}' \
+              --dry-run=client -o yaml | sudo kubectl apply -f -"
 
           ssh -o StrictHostKeyChecking=no sk@100.108.60.90 << 'DEPLOY_EOF'
             export KUBECONFIG=/home/sk/.kube/config
