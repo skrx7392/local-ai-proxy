@@ -118,7 +118,7 @@ func TestServeHTTP_NotFoundForWrongMethod(t *testing.T) {
 	h := NewHandler("http://localhost:11434", usageCh, 52428800)
 
 	// GET on chat/completions should be 404 (only POST is handled)
-	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/completions", nil)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -133,7 +133,7 @@ func TestServeHTTP_NotFoundForPostModels(t *testing.T) {
 	h := NewHandler("http://localhost:11434", usageCh, 52428800)
 
 	// POST on /v1/models should be 404 (only GET is handled)
-	req := httptest.NewRequest(http.MethodPost, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -238,7 +238,7 @@ func TestHandleModels(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
 	h := NewHandler(upstream.URL, usageCh, 52428800)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -284,7 +284,7 @@ func TestHandleChatCompletions_NonStreaming(t *testing.T) {
 	h := NewHandler(upstream.URL, usageCh, 52428800)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	key := testAPIKey()
@@ -347,7 +347,7 @@ func TestHandleChatCompletions_NonStreaming_NoKey(t *testing.T) {
 	h := NewHandler(upstream.URL, usageCh, 52428800)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hey"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	rec := httptest.NewRecorder()
@@ -386,7 +386,7 @@ func TestHandleChatCompletions_Streaming(t *testing.T) {
 		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBodyBytes))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", bytes.NewReader(reqBodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 
 	key := testAPIKey()
@@ -444,7 +444,7 @@ func TestHandleChatCompletions_Streaming_NoKey(t *testing.T) {
 		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBodyBytes))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", bytes.NewReader(reqBodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 	// No key in context
 
@@ -477,7 +477,7 @@ func TestHandleChatCompletions_BodyTooLarge(t *testing.T) {
 
 	// Send a body larger than 10 bytes
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"This is a long message that exceeds the body limit"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	rec := httptest.NewRecorder()
@@ -516,7 +516,7 @@ func TestHandleChatCompletions_UpstreamError500_NonStreaming(t *testing.T) {
 	h := NewHandler(upstream.URL, usageCh, 52428800)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	key := testAPIKey()
@@ -565,7 +565,7 @@ func TestHandleChatCompletions_UpstreamError500_Streaming(t *testing.T) {
 		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBodyBytes))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", bytes.NewReader(reqBodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 
 	key := testAPIKey()
@@ -601,7 +601,7 @@ func TestHandleChatCompletions_UpstreamDown_NonStreaming(t *testing.T) {
 	h := NewHandler(upstreamURL, usageCh, 52428800)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	key := testAPIKey()
@@ -640,7 +640,7 @@ func TestHandleChatCompletions_UpstreamDown_Streaming(t *testing.T) {
 		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBodyBytes))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", bytes.NewReader(reqBodyBytes))
 	req.Header.Set("Content-Type", "application/json")
 
 	key := testAPIKey()
@@ -822,7 +822,7 @@ func TestHandleChatCompletions_InvalidJSON(t *testing.T) {
 
 	// Send invalid JSON that can still be read
 	reqBody := `not valid json at all`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	rec := httptest.NewRecorder()
@@ -848,7 +848,7 @@ func TestHandleChatCompletions_EmptyBody(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
 	h := NewHandler(upstream.URL, usageCh, 52428800)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(""))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(""))
 	req.Header.Set("Content-Type", "application/json")
 
 	rec := httptest.NewRecorder()
@@ -900,7 +900,7 @@ func TestHandleChatCompletions_ReadBodyError(t *testing.T) {
 	h := NewHandler(upstream.URL, usageCh, 52428800)
 
 	// Use a reader that returns an error
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", &errorReader{})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", &errorReader{})
 	req.Header.Set("Content-Type", "application/json")
 
 	rec := httptest.NewRecorder()
@@ -951,7 +951,7 @@ func TestHandleChatCompletions_StreamFalse(t *testing.T) {
 	h := NewHandler(upstream.URL, usageCh, 52428800)
 
 	reqBody := `{"model":"llama3:latest","stream":false,"messages":[{"role":"user","content":"Hi"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	key := testAPIKey()
@@ -992,7 +992,7 @@ func TestHandleChatCompletions_NonStreaming_NoUsageInResponse(t *testing.T) {
 	h := NewHandler(upstream.URL, usageCh, 52428800)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
 	key := testAPIKey()

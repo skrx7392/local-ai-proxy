@@ -5,7 +5,7 @@ import (
 )
 
 // CORS returns middleware that adds CORS headers for the given origins.
-// Applied to /v1/* and /healthz only, NOT /admin/*.
+// Applied to /api/v1/*, /api/auth/*, and /api/users/* only, NOT /api/admin/*.
 func CORS(origins string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

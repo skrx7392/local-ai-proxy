@@ -40,7 +40,7 @@ func setupAdminTest(t *testing.T) (http.Handler, *store.Store) {
 func TestAdmin_MissingAdminKey(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -53,7 +53,7 @@ func TestAdmin_MissingAdminKey(t *testing.T) {
 func TestAdmin_WrongAdminKey(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
 	req.Header.Set("X-Admin-Key", "wrong-key")
 	rec := httptest.NewRecorder()
 
@@ -68,7 +68,7 @@ func TestAdmin_CreateKey(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
 	body := `{"name":"test-key","rate_limit":30}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/keys", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -101,7 +101,7 @@ func TestAdmin_CreateKey_DefaultRateLimit(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
 	body := `{"name":"default-rl-key"}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/keys", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -123,7 +123,7 @@ func TestAdmin_CreateKey_MissingName(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
 	body := `{"rate_limit":30}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/keys", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -138,7 +138,7 @@ func TestAdmin_CreateKey_MissingName(t *testing.T) {
 func TestAdmin_CreateKey_InvalidJSON(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/keys", bytes.NewBufferString("{invalid"))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString("{invalid"))
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -155,14 +155,14 @@ func TestAdmin_ListKeys(t *testing.T) {
 
 	// Create a key first
 	body := `{"name":"list-test-key","rate_limit":10}`
-	createReq := httptest.NewRequest(http.MethodPost, "/admin/keys", bytes.NewBufferString(body))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
 	createReq.Header.Set("X-Admin-Key", testAdminKey)
 	createReq.Header.Set("Content-Type", "application/json")
 	createRec := httptest.NewRecorder()
 	h.ServeHTTP(createRec, createReq)
 
 	// List keys
-	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -186,7 +186,7 @@ func TestAdmin_RevokeKey(t *testing.T) {
 
 	// Create a key
 	body := `{"name":"revoke-test-key","rate_limit":10}`
-	createReq := httptest.NewRequest(http.MethodPost, "/admin/keys", bytes.NewBufferString(body))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
 	createReq.Header.Set("X-Admin-Key", testAdminKey)
 	createReq.Header.Set("Content-Type", "application/json")
 	createRec := httptest.NewRecorder()
@@ -196,7 +196,7 @@ func TestAdmin_RevokeKey(t *testing.T) {
 	json.Unmarshal(createRec.Body.Bytes(), &created)
 
 	// Revoke it
-	req := httptest.NewRequest(http.MethodDelete, "/admin/keys/"+strconv.FormatInt(created.ID, 10), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/admin/keys/"+strconv.FormatInt(created.ID, 10), nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -216,7 +216,7 @@ func TestAdmin_RevokeKey(t *testing.T) {
 func TestAdmin_RevokeKey_NotFound(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodDelete, "/admin/keys/999999", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/admin/keys/999999", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -230,7 +230,7 @@ func TestAdmin_RevokeKey_NotFound(t *testing.T) {
 func TestAdmin_RevokeKey_InvalidID(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodDelete, "/admin/keys/not-a-number", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/admin/keys/not-a-number", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -246,7 +246,7 @@ func TestAdmin_GetUsage(t *testing.T) {
 
 	// Create a key and log some usage
 	body := `{"name":"usage-test-key","rate_limit":10}`
-	createReq := httptest.NewRequest(http.MethodPost, "/admin/keys", bytes.NewBufferString(body))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
 	createReq.Header.Set("X-Admin-Key", testAdminKey)
 	createReq.Header.Set("Content-Type", "application/json")
 	createRec := httptest.NewRecorder()
@@ -267,7 +267,7 @@ func TestAdmin_GetUsage(t *testing.T) {
 	})
 
 	// Get usage
-	req := httptest.NewRequest(http.MethodGet, "/admin/usage", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/usage", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -292,7 +292,7 @@ func TestAdmin_GetUsage_WithKeyFilter(t *testing.T) {
 
 	// Create a key and log usage
 	body := `{"name":"usage-filter-key","rate_limit":10}`
-	createReq := httptest.NewRequest(http.MethodPost, "/admin/keys", bytes.NewBufferString(body))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
 	createReq.Header.Set("X-Admin-Key", testAdminKey)
 	createReq.Header.Set("Content-Type", "application/json")
 	createRec := httptest.NewRecorder()
@@ -308,7 +308,7 @@ func TestAdmin_GetUsage_WithKeyFilter(t *testing.T) {
 	})
 
 	// Get usage with key_id filter
-	req := httptest.NewRequest(http.MethodGet, "/admin/usage?key_id="+strconv.FormatInt(created.ID, 10), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/usage?key_id="+strconv.FormatInt(created.ID, 10), nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -322,7 +322,7 @@ func TestAdmin_GetUsage_WithKeyFilter(t *testing.T) {
 func TestAdmin_GetUsage_WithSinceFilter(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/usage?since=2024-01-01", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/usage?since=2024-01-01", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -336,7 +336,7 @@ func TestAdmin_GetUsage_WithSinceFilter(t *testing.T) {
 func TestAdmin_GetUsage_WithRFC3339Since(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/usage?since=2024-01-01T00:00:00Z", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/usage?since=2024-01-01T00:00:00Z", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -350,7 +350,7 @@ func TestAdmin_GetUsage_WithRFC3339Since(t *testing.T) {
 func TestAdmin_GetUsage_InvalidSince(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/usage?since=not-a-date", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/usage?since=not-a-date", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -364,7 +364,7 @@ func TestAdmin_GetUsage_InvalidSince(t *testing.T) {
 func TestAdmin_GetUsage_InvalidKeyID(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/usage?key_id=abc", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/usage?key_id=abc", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -382,7 +382,7 @@ func TestAdmin_ListUsers(t *testing.T) {
 	_, _ = s.CreateUser("admin-list1@example.com", "hash", "User One")
 	_, _ = s.CreateUser("admin-list2@example.com", "hash", "User Two")
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -405,7 +405,7 @@ func TestAdmin_DeactivateUser(t *testing.T) {
 
 	id, _ := s.CreateUser("deactivate@example.com", "hash", "Deactivate Me")
 
-	req := httptest.NewRequest(http.MethodPut, "/admin/users/"+strconv.FormatInt(id, 10)+"/deactivate", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/"+strconv.FormatInt(id, 10)+"/deactivate", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -426,7 +426,7 @@ func TestAdmin_ActivateUser(t *testing.T) {
 	id, _ := s.CreateUser("activate@example.com", "hash", "Activate Me")
 	_ = s.SetUserActive(id, false)
 
-	req := httptest.NewRequest(http.MethodPut, "/admin/users/"+strconv.FormatInt(id, 10)+"/activate", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/"+strconv.FormatInt(id, 10)+"/activate", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -444,7 +444,7 @@ func TestAdmin_ActivateUser(t *testing.T) {
 func TestAdmin_ActivateUser_NotFound(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodPut, "/admin/users/999999/activate", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/999999/activate", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -457,7 +457,7 @@ func TestAdmin_ActivateUser_NotFound(t *testing.T) {
 func TestAdmin_ActivateUser_InvalidID(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	req := httptest.NewRequest(http.MethodPut, "/admin/users/not-a-number/activate", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/users/not-a-number/activate", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -473,7 +473,7 @@ func TestAdmin_RateLimiting(t *testing.T) {
 	// The admin rate limiter allows 10 requests per minute.
 	// Send 10 requests which should succeed, then the 11th should fail.
 	for i := 0; i < 10; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
 		req.Header.Set("X-Admin-Key", testAdminKey)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -484,7 +484,7 @@ func TestAdmin_RateLimiting(t *testing.T) {
 	}
 
 	// 11th request should be rate limited
-	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

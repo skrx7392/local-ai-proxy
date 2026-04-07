@@ -11,7 +11,7 @@ func TestCORS_Preflight(t *testing.T) {
 		t.Error("handler should not be called for OPTIONS preflight")
 	}))
 
-	req := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -41,7 +41,7 @@ func TestCORS_NormalRequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -62,7 +62,7 @@ func TestCORS_CustomOrigin(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -79,7 +79,7 @@ func TestCORS_PostRequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)

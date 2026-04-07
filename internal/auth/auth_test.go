@@ -99,7 +99,7 @@ func TestMiddleware_ValidKey(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+rawKey)
 	rec := httptest.NewRecorder()
 
@@ -117,7 +117,7 @@ func TestMiddleware_InvalidKey(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer invalid-key-that-does-not-exist")
 	rec := httptest.NewRecorder()
 
@@ -135,7 +135,7 @@ func TestMiddleware_MissingHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	// No Authorization header
 	rec := httptest.NewRecorder()
 
@@ -153,7 +153,7 @@ func TestMiddleware_MalformedHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	req.Header.Set("Authorization", "Basic some-creds") // Not "Bearer"
 	rec := httptest.NewRecorder()
 

@@ -52,6 +52,8 @@ func NewHandler(ollamaRawURL string, usageCh chan<- store.UsageEntry, maxBody in
 		req.URL.Host = target.Host
 		req.Host = target.Host
 		req.Header.Del("Authorization")
+		// Strip /api prefix — upstream Ollama expects /v1/... paths
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api")
 	}
 
 	client := &http.Client{
@@ -70,9 +72,9 @@ func NewHandler(ollamaRawURL string, usageCh chan<- store.UsageEntry, maxBody in
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only allow specific endpoints
 	switch {
-	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/chat/completions":
 		h.handleChatCompletions(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/models":
 		h.handleModels(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Not found")

@@ -77,19 +77,20 @@ func main() {
 	mux := http.NewServeMux()
 
 	// Health check — no auth, no CORS
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	// Client API — CORS + auth + rate limit + proxy
-	mux.Handle("/v1/", cors(authMiddleware(rateLimitMiddleware(proxyHandler))))
+	mux.Handle("/api/v1/", cors(authMiddleware(rateLimitMiddleware(proxyHandler))))
 
 	// Admin — no CORS
-	mux.Handle("/admin/", adminHandler)
+	mux.Handle("/api/admin/", adminHandler)
 
 	// User API — CORS, session auth handled internally
-	mux.Handle("/api/", cors(userHandler))
+	mux.Handle("/api/auth/", cors(userHandler))
+	mux.Handle("/api/users/", cors(userHandler))
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
