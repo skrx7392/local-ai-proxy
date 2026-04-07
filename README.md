@@ -1,6 +1,6 @@
 # local-ai-proxy
 
-An OpenAI-compatible reverse proxy to Ollama with API key authentication, per-key rate limiting, usage tracking, and user management. Deployed to k3s at `ai.kinvee.in/api`.
+An OpenAI-compatible reverse proxy to Ollama with API key authentication, per-key rate limiting, usage tracking, and user management. Deployed to k3s at `ai.kinvee.in/api`. All routes are under the `/api` prefix, leaving `ai.kinvee.in/` free for the frontend.
 
 ## Architecture
 
@@ -18,28 +18,41 @@ Client → CORS → Auth → Rate Limit → Proxy → Ollama
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/chat/completions` | Proxied to Ollama with usage tracking (streaming + non-streaming) |
-| `GET` | `/v1/models` | Passthrough to Ollama |
-| `GET` | `/healthz` | Liveness/readiness probe |
+| `POST` | `/api/v1/chat/completions` | Proxied to Ollama with usage tracking (streaming + non-streaming) |
+| `GET` | `/api/v1/models` | Passthrough to Ollama |
+| `GET` | `/api/healthz` | Liveness/readiness probe |
+
+### Auth API (public + session-authenticated)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/auth/register` | Register a new user account |
+| `POST` | `/api/auth/login` | Login and receive a session token |
+| `POST` | `/api/auth/logout` | Invalidate session (session-authenticated) |
 
 ### User API (session-authenticated via `Authorization: Bearer <session-token>` or `X-Session-Token`)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/register` | Register a new user account |
-| `POST` | `/api/login` | Login and receive a session token |
+| `GET` | `/api/users/profile` | Get user profile |
+| `PUT` | `/api/users/profile` | Update user profile |
+| `PUT` | `/api/users/password` | Change password |
+| `POST` | `/api/users/keys` | Create user API key |
+| `GET` | `/api/users/keys` | List user's API keys |
+| `DELETE` | `/api/users/keys/{id}` | Revoke user's API key |
+| `GET` | `/api/users/usage` | Get usage stats for user's keys |
 
 ### Admin (authenticated via `X-Admin-Key` header, rate limited to 10 req/min)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/admin/keys` | Create API key (`{name, rate_limit}`) — returns full key once, never retrievable again |
-| `GET` | `/admin/keys` | List all keys (id, name, key_prefix, rate_limit, created_at, revoked) |
-| `DELETE` | `/admin/keys/{id}` | Revoke (soft-delete) a key |
-| `GET` | `/admin/usage` | Aggregated usage stats (filterable by `key_id` and `since`) |
-| `GET` | `/admin/users` | List all users |
-| `PUT` | `/admin/users/{id}/activate` | Activate a user account |
-| `PUT` | `/admin/users/{id}/deactivate` | Deactivate a user account |
+| `POST` | `/api/admin/keys` | Create API key (`{name, rate_limit}`) — returns full key once, never retrievable again |
+| `GET` | `/api/admin/keys` | List all keys (id, name, key_prefix, rate_limit, created_at, revoked) |
+| `DELETE` | `/api/admin/keys/{id}` | Revoke (soft-delete) a key |
+| `GET` | `/api/admin/usage` | Aggregated usage stats (filterable by `key_id` and `since`) |
+| `GET` | `/api/admin/users` | List all users |
+| `PUT` | `/api/admin/users/{id}/activate` | Activate a user account |
+| `PUT` | `/api/admin/users/{id}/deactivate` | Deactivate a user account |
 
 ## Request Flow
 

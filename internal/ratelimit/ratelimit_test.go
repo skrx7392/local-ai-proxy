@@ -248,7 +248,7 @@ func TestMiddleware_NoKeyInContext(t *testing.T) {
 	mw := Middleware(l)(next)
 
 	// Request with no auth key in context
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
 
 	mw.ServeHTTP(rec, req)
@@ -278,7 +278,7 @@ func TestMiddleware_AllowedRequest(t *testing.T) {
 		RateLimit: 60,
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	ctx := auth.WithKey(req.Context(), key)
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()

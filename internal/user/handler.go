@@ -81,20 +81,20 @@ func NewHandler(dataStore *store.Store) http.Handler {
 
 	mux := http.NewServeMux()
 
-	// Public routes (no auth)
-	mux.HandleFunc("POST /api/register", h.register)
-	mux.HandleFunc("POST /api/login", h.login)
+	// Public auth routes (no session required)
+	mux.HandleFunc("POST /api/auth/register", h.register)
+	mux.HandleFunc("POST /api/auth/login", h.login)
 
-	// Authenticated routes (session auth)
+	// Session-authenticated routes
 	sessionAuth := SessionMiddleware(dataStore)
-	mux.Handle("POST /api/logout", sessionAuth(http.HandlerFunc(h.logout)))
-	mux.Handle("GET /api/profile", sessionAuth(http.HandlerFunc(h.getProfile)))
-	mux.Handle("PUT /api/profile", sessionAuth(http.HandlerFunc(h.updateProfile)))
-	mux.Handle("PUT /api/password", sessionAuth(http.HandlerFunc(h.changePassword)))
-	mux.Handle("POST /api/keys", sessionAuth(http.HandlerFunc(h.createKey)))
-	mux.Handle("GET /api/keys", sessionAuth(http.HandlerFunc(h.listKeys)))
-	mux.Handle("DELETE /api/keys/{id}", sessionAuth(http.HandlerFunc(h.revokeKey)))
-	mux.Handle("GET /api/usage", sessionAuth(http.HandlerFunc(h.getUsage)))
+	mux.Handle("POST /api/auth/logout", sessionAuth(http.HandlerFunc(h.logout)))
+	mux.Handle("GET /api/users/profile", sessionAuth(http.HandlerFunc(h.getProfile)))
+	mux.Handle("PUT /api/users/profile", sessionAuth(http.HandlerFunc(h.updateProfile)))
+	mux.Handle("PUT /api/users/password", sessionAuth(http.HandlerFunc(h.changePassword)))
+	mux.Handle("POST /api/users/keys", sessionAuth(http.HandlerFunc(h.createKey)))
+	mux.Handle("GET /api/users/keys", sessionAuth(http.HandlerFunc(h.listKeys)))
+	mux.Handle("DELETE /api/users/keys/{id}", sessionAuth(http.HandlerFunc(h.revokeKey)))
+	mux.Handle("GET /api/users/usage", sessionAuth(http.HandlerFunc(h.getUsage)))
 
 	return mux
 }

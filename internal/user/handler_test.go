@@ -51,7 +51,7 @@ func registerAndLogin(t *testing.T, h http.Handler, email, password, name string
 
 	// Register
 	body := `{"email":"` + email + `","password":"` + password + `","name":"` + name + `"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -61,7 +61,7 @@ func registerAndLogin(t *testing.T, h http.Handler, email, password, name string
 
 	// Login
 	loginBody := `{"email":"` + email + `","password":"` + password + `"}`
-	req = httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(loginBody))
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -80,7 +80,7 @@ func TestRegister_Success(t *testing.T) {
 	h, _ := setupUserTest(t)
 
 	body := `{"email":"test@example.com","password":"securepass123","name":"Test User"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -104,13 +104,13 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	h, _ := setupUserTest(t)
 
 	body := `{"email":"dup@example.com","password":"securepass123","name":"First"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	// Register again with same email
-	req = httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -124,7 +124,7 @@ func TestRegister_MissingFields(t *testing.T) {
 	h, _ := setupUserTest(t)
 
 	body := `{"email":"no-pw@example.com"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -138,7 +138,7 @@ func TestRegister_WeakPassword(t *testing.T) {
 	h, _ := setupUserTest(t)
 
 	body := `{"email":"weak@example.com","password":"short","name":"Weak"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -151,7 +151,7 @@ func TestRegister_WeakPassword(t *testing.T) {
 func TestRegister_InvalidJSON(t *testing.T) {
 	h, _ := setupUserTest(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString("{invalid"))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString("{invalid"))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -168,14 +168,14 @@ func TestLogin_Success(t *testing.T) {
 
 	// Register first
 	body := `{"email":"login@example.com","password":"securepass123","name":"Login User"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	// Login
 	loginBody := `{"email":"login@example.com","password":"securepass123"}`
-	req = httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(loginBody))
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -198,13 +198,13 @@ func TestLogin_WrongPassword(t *testing.T) {
 	h, _ := setupUserTest(t)
 
 	body := `{"email":"wrong-pw@example.com","password":"securepass123","name":"Test"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	loginBody := `{"email":"wrong-pw@example.com","password":"wrongpassword"}`
-	req = httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(loginBody))
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -218,7 +218,7 @@ func TestLogin_NonexistentEmail(t *testing.T) {
 	h, _ := setupUserTest(t)
 
 	body := `{"email":"noone@example.com","password":"securepass123"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -232,7 +232,7 @@ func TestLogin_MissingFields(t *testing.T) {
 	h, _ := setupUserTest(t)
 
 	body := `{"email":"partial@example.com"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -247,7 +247,7 @@ func TestLogin_DisabledAccount(t *testing.T) {
 
 	// Register
 	body := `{"email":"disabled@example.com","password":"securepass123","name":"Disabled"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -261,7 +261,7 @@ func TestLogin_DisabledAccount(t *testing.T) {
 
 	// Try login
 	loginBody := `{"email":"disabled@example.com","password":"securepass123"}`
-	req = httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(loginBody))
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -278,7 +278,7 @@ func TestLogout_Success(t *testing.T) {
 
 	token := registerAndLogin(t, h, "logout@example.com", "securepass123", "Logout User")
 
-	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -288,7 +288,7 @@ func TestLogout_Success(t *testing.T) {
 	}
 
 	// Token should no longer work
-	req = httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/users/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -305,7 +305,7 @@ func TestGetProfile(t *testing.T) {
 
 	token := registerAndLogin(t, h, "profile@example.com", "securepass123", "Profile User")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/users/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -330,7 +330,7 @@ func TestGetProfile(t *testing.T) {
 func TestGetProfile_NoAuth(t *testing.T) {
 	h, _ := setupUserTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/users/profile", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -344,7 +344,7 @@ func TestGetProfile_XSessionToken(t *testing.T) {
 
 	token := registerAndLogin(t, h, "xheader@example.com", "securepass123", "XHeader User")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/users/profile", nil)
 	req.Header.Set("X-Session-Token", token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -360,7 +360,7 @@ func TestUpdateProfile(t *testing.T) {
 	token := registerAndLogin(t, h, "update-profile@example.com", "securepass123", "Original Name")
 
 	body := `{"name":"Updated Name","email":"new-email@example.com"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/profile", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/users/profile", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -372,7 +372,7 @@ func TestUpdateProfile(t *testing.T) {
 
 	// Verify by getting profile (need to re-login with new email)
 	// Actually the session is still valid, just check profile
-	req = httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/users/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -395,7 +395,7 @@ func TestChangePassword(t *testing.T) {
 	token := registerAndLogin(t, h, "changepw@example.com", "securepass123", "PW User")
 
 	body := `{"old_password":"securepass123","new_password":"newsecurepass456"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/password", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/users/password", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -407,7 +407,7 @@ func TestChangePassword(t *testing.T) {
 
 	// Login with new password should work
 	loginBody := `{"email":"changepw@example.com","password":"newsecurepass456"}`
-	req = httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewBufferString(loginBody))
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -423,7 +423,7 @@ func TestChangePassword_WrongOld(t *testing.T) {
 	token := registerAndLogin(t, h, "wrongold@example.com", "securepass123", "WrongOld")
 
 	body := `{"old_password":"wrongpassword","new_password":"newsecurepass456"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/password", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/users/password", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -440,7 +440,7 @@ func TestChangePassword_WeakNew(t *testing.T) {
 	token := registerAndLogin(t, h, "weaknew@example.com", "securepass123", "WeakNew")
 
 	body := `{"old_password":"securepass123","new_password":"short"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/password", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/users/password", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -459,7 +459,7 @@ func TestCreateKey(t *testing.T) {
 	token := registerAndLogin(t, h, "keyowner@example.com", "securepass123", "Key Owner")
 
 	body := `{"name":"my-key","rate_limit":30}`
-	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/users/keys", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -488,7 +488,7 @@ func TestCreateKey_DefaultRateLimit(t *testing.T) {
 	token := registerAndLogin(t, h, "default-rl@example.com", "securepass123", "Default RL")
 
 	body := `{"name":"default-key"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/users/keys", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -513,14 +513,14 @@ func TestListKeys(t *testing.T) {
 	// Create two keys
 	for _, name := range []string{"key-a", "key-b"} {
 		body := `{"name":"` + name + `"}`
-		req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewBufferString(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/users/keys", bytes.NewBufferString(body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/keys", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/users/keys", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -543,7 +543,7 @@ func TestRevokeKey(t *testing.T) {
 
 	// Create a key
 	body := `{"name":"to-revoke"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/users/keys", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -553,7 +553,7 @@ func TestRevokeKey(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &created)
 
 	// Revoke it
-	req = httptest.NewRequest(http.MethodDelete, "/api/keys/"+strconv.FormatInt(created.ID, 10), nil)
+	req = httptest.NewRequest(http.MethodDelete, "/api/users/keys/"+strconv.FormatInt(created.ID, 10), nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -569,7 +569,7 @@ func TestRevokeKey_NotOwned(t *testing.T) {
 	// User A creates a key
 	tokenA := registerAndLogin(t, h, "usera@example.com", "securepass123", "User A")
 	body := `{"name":"a-key"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/users/keys", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+tokenA)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -599,7 +599,7 @@ func TestGetUsage(t *testing.T) {
 
 	// Create a key
 	body := `{"name":"usage-key"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/users/keys", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -616,7 +616,7 @@ func TestGetUsage(t *testing.T) {
 	})
 
 	// Get usage
-	req = httptest.NewRequest(http.MethodGet, "/api/usage", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/users/usage", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -637,7 +637,7 @@ func TestGetUsage(t *testing.T) {
 func TestSessionMiddleware_InvalidToken(t *testing.T) {
 	h, _ := setupUserTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/users/profile", nil)
 	req.Header.Set("Authorization", "Bearer invalid-token")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -650,7 +650,7 @@ func TestSessionMiddleware_InvalidToken(t *testing.T) {
 func TestSessionMiddleware_MissingToken(t *testing.T) {
 	h, _ := setupUserTest(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/users/profile", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 

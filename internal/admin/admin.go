@@ -59,13 +59,13 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /admin/keys", handler.createKey)
-	mux.HandleFunc("GET /admin/keys", handler.listKeys)
-	mux.HandleFunc("DELETE /admin/keys/{id}", handler.revokeKey)
-	mux.HandleFunc("GET /admin/usage", handler.getUsage)
-	mux.HandleFunc("GET /admin/users", handler.listUsers)
-	mux.HandleFunc("PUT /admin/users/{id}/activate", handler.activateUser)
-	mux.HandleFunc("PUT /admin/users/{id}/deactivate", handler.deactivateUser)
+	mux.HandleFunc("POST /api/admin/keys", handler.createKey)
+	mux.HandleFunc("GET /api/admin/keys", handler.listKeys)
+	mux.HandleFunc("DELETE /api/admin/keys/{id}", handler.revokeKey)
+	mux.HandleFunc("GET /api/admin/usage", handler.getUsage)
+	mux.HandleFunc("GET /api/admin/users", handler.listUsers)
+	mux.HandleFunc("PUT /api/admin/users/{id}/activate", handler.activateUser)
+	mux.HandleFunc("PUT /api/admin/users/{id}/deactivate", handler.deactivateUser)
 
 	return handler.authMiddleware(mux)
 }
