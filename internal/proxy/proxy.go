@@ -266,7 +266,12 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 
 	// Credit settlement
 	if creditEnabled {
-		h.settleCredits(holdID, key, &ud, len(respBody), status, pricing)
+		if resp.StatusCode != http.StatusOK {
+			// Upstream error — release hold, no charge
+			h.db.ReleaseHold(holdID)
+		} else {
+			h.settleCredits(holdID, key, &ud, len(respBody), pricing)
+		}
 	}
 
 	// Log usage
@@ -410,12 +415,8 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 }
 
 // settleCredits handles credit settlement for non-streaming responses.
-func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, respBodyLen int, status string, pricing *store.CreditPricing) {
-	if status == "error" && respBodyLen == 0 {
-		h.db.ReleaseHold(holdID)
-		return
-	}
-
+// Called only for successful (200) upstream responses.
+func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, respBodyLen int, pricing *store.CreditPricing) {
 	promptTokens := ud.Usage.PromptTokens
 	completionTokens := ud.Usage.CompletionTokens
 
