@@ -67,6 +67,24 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	mux.HandleFunc("PUT /api/admin/users/{id}/activate", handler.activateUser)
 	mux.HandleFunc("PUT /api/admin/users/{id}/deactivate", handler.deactivateUser)
 
+	// Credit management
+	mux.HandleFunc("GET /api/admin/accounts", handler.listAccounts)
+	mux.HandleFunc("POST /api/admin/accounts/{id}/credits", handler.grantCredits)
+	mux.HandleFunc("POST /api/admin/accounts/{id}/keys", handler.createAccountKey)
+
+	// Registration tokens
+	mux.HandleFunc("POST /api/admin/registration-tokens", handler.createRegistrationToken)
+	mux.HandleFunc("GET /api/admin/registration-tokens", handler.listRegistrationTokens)
+	mux.HandleFunc("DELETE /api/admin/registration-tokens/{id}", handler.revokeRegistrationToken)
+
+	// Pricing
+	mux.HandleFunc("GET /api/admin/pricing", handler.listPricing)
+	mux.HandleFunc("POST /api/admin/pricing", handler.upsertPricing)
+	mux.HandleFunc("DELETE /api/admin/pricing/{id}", handler.deletePricing)
+
+	// Session limits
+	mux.HandleFunc("PUT /api/admin/keys/{id}/session-limit", handler.setSessionLimit)
+
 	return handler.authMiddleware(mux)
 }
 
@@ -300,6 +318,348 @@ func (h *handler) setUserActiveHandler(w http.ResponseWriter, r *http.Request, a
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": status})
+}
+
+// --- Credit management ---
+
+func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
+	accounts, err := h.store.ListAccountsWithBalances()
+	if err != nil {
+		log.Printf("list accounts error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list accounts")
+		return
+	}
+
+	type accountResponse struct {
+		ID        int64   `json:"id"`
+		Name      string  `json:"name"`
+		Type      string  `json:"type"`
+		IsActive  bool    `json:"is_active"`
+		Balance   float64 `json:"balance"`
+		Reserved  float64 `json:"reserved"`
+		Available float64 `json:"available"`
+		CreatedAt string  `json:"created_at"`
+	}
+
+	resp := make([]accountResponse, len(accounts))
+	for i, a := range accounts {
+		resp[i] = accountResponse{
+			ID:        a.ID,
+			Name:      a.Name,
+			Type:      a.Type,
+			IsActive:  a.IsActive,
+			Balance:   a.Balance,
+			Reserved:  a.Reserved,
+			Available: a.Balance - a.Reserved,
+			CreatedAt: a.CreatedAt.Format(time.RFC3339),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *handler) grantCredits(w http.ResponseWriter, r *http.Request) {
+	accountID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid account ID")
+		return
+	}
+
+	var req struct {
+		Amount      float64 `json:"amount"`
+		Description string  `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		return
+	}
+	if req.Amount == 0 {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_amount", "invalid_request_error", "amount must be non-zero")
+		return
+	}
+
+	if err := h.store.AddCredits(accountID, req.Amount, req.Description); err != nil {
+		log.Printf("grant credits error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to grant credits")
+		return
+	}
+
+	bal, _ := h.store.GetCreditBalance(accountID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":  "granted",
+		"amount":  req.Amount,
+		"balance": bal.Balance,
+	})
+}
+
+func (h *handler) createAccountKey(w http.ResponseWriter, r *http.Request) {
+	accountID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid account ID")
+		return
+	}
+
+	var req createKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		return
+	}
+	if req.Name == "" {
+		proxy.WriteError(w, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
+		return
+	}
+	if req.RateLimit <= 0 {
+		req.RateLimit = 60
+	}
+
+	rawBytes := make([]byte, 32)
+	if _, err := rand.Read(rawBytes); err != nil {
+		log.Printf("crypto/rand error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate key")
+		return
+	}
+	rawKey := "sk-" + hex.EncodeToString(rawBytes)
+	keyPrefix := rawKey[:11]
+	keyHash := auth.HashKey(rawKey)
+
+	id, err := h.store.CreateKeyForAccountOnly(accountID, req.Name, keyHash, keyPrefix, req.RateLimit)
+	if err != nil {
+		log.Printf("create account key error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create key")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(createKeyResponse{
+		ID:        id,
+		Name:      req.Name,
+		Key:       rawKey,
+		KeyPrefix: keyPrefix,
+		RateLimit: req.RateLimit,
+	})
+}
+
+// --- Registration tokens ---
+
+func (h *handler) createRegistrationToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name        string  `json:"name"`
+		CreditGrant float64 `json:"credit_grant"`
+		MaxUses     int     `json:"max_uses"`
+		ExpiresAt   *string `json:"expires_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		return
+	}
+	if req.Name == "" {
+		proxy.WriteError(w, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
+		return
+	}
+	if req.MaxUses <= 0 {
+		req.MaxUses = 1
+	}
+
+	// Generate token
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		log.Printf("crypto/rand error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate token")
+		return
+	}
+	rawToken := "reg-" + hex.EncodeToString(tokenBytes)
+	tokenHash := auth.HashKey(rawToken)
+
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil {
+		t, err := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if err != nil {
+			proxy.WriteError(w, http.StatusBadRequest, "invalid_expires_at", "invalid_request_error", "expires_at must be RFC3339")
+			return
+		}
+		expiresAt = &t
+	}
+
+	id, err := h.store.CreateRegistrationToken(req.Name, tokenHash, req.CreditGrant, req.MaxUses, expiresAt)
+	if err != nil {
+		log.Printf("create registration token error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create token")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]any{
+		"id":           id,
+		"name":         req.Name,
+		"token":        rawToken,
+		"credit_grant": req.CreditGrant,
+		"max_uses":     req.MaxUses,
+	})
+}
+
+func (h *handler) listRegistrationTokens(w http.ResponseWriter, r *http.Request) {
+	tokens, err := h.store.ListRegistrationTokens()
+	if err != nil {
+		log.Printf("list registration tokens error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list tokens")
+		return
+	}
+
+	type tokenResponse struct {
+		ID          int64   `json:"id"`
+		Name        string  `json:"name"`
+		CreditGrant float64 `json:"credit_grant"`
+		MaxUses     int     `json:"max_uses"`
+		Uses        int     `json:"uses"`
+		CreatedAt   string  `json:"created_at"`
+		ExpiresAt   *string `json:"expires_at"`
+		Revoked     bool    `json:"revoked"`
+	}
+
+	resp := make([]tokenResponse, len(tokens))
+	for i, t := range tokens {
+		tr := tokenResponse{
+			ID:          t.ID,
+			Name:        t.Name,
+			CreditGrant: t.CreditGrant,
+			MaxUses:     t.MaxUses,
+			Uses:        t.Uses,
+			CreatedAt:   t.CreatedAt.Format(time.RFC3339),
+			Revoked:     t.Revoked,
+		}
+		if t.ExpiresAt != nil {
+			s := t.ExpiresAt.Format(time.RFC3339)
+			tr.ExpiresAt = &s
+		}
+		resp[i] = tr
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *handler) revokeRegistrationToken(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid token ID")
+		return
+	}
+
+	if err := h.store.RevokeRegistrationToken(id); err != nil {
+		if err.Error() == "registration token not found" {
+			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Token not found")
+			return
+		}
+		log.Printf("revoke registration token error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to revoke token")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "revoked"})
+}
+
+// --- Pricing ---
+
+func (h *handler) listPricing(w http.ResponseWriter, r *http.Request) {
+	pricing, err := h.store.ListActivePricing()
+	if err != nil {
+		log.Printf("list pricing error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list pricing")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(pricing)
+}
+
+func (h *handler) upsertPricing(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ModelID           string  `json:"model_id"`
+		PromptRate        float64 `json:"prompt_rate"`
+		CompletionRate    float64 `json:"completion_rate"`
+		TypicalCompletion int     `json:"typical_completion"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		return
+	}
+	if req.ModelID == "" {
+		proxy.WriteError(w, http.StatusBadRequest, "missing_model_id", "invalid_request_error", "model_id is required")
+		return
+	}
+	if req.PromptRate <= 0 || req.CompletionRate <= 0 {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_rates", "invalid_request_error", "prompt_rate and completion_rate must be positive")
+		return
+	}
+	if req.TypicalCompletion <= 0 {
+		req.TypicalCompletion = 500
+	}
+
+	if err := h.store.UpsertPricing(req.ModelID, req.PromptRate, req.CompletionRate, req.TypicalCompletion); err != nil {
+		log.Printf("upsert pricing error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update pricing")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+}
+
+func (h *handler) deletePricing(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid pricing ID")
+		return
+	}
+
+	if err := h.store.DeletePricing(id); err != nil {
+		if err.Error() == "pricing not found" {
+			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Pricing not found")
+			return
+		}
+		log.Printf("delete pricing error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to delete pricing")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+// --- Session limits ---
+
+func (h *handler) setSessionLimit(w http.ResponseWriter, r *http.Request) {
+	keyID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid key ID")
+		return
+	}
+
+	var req struct {
+		Limit *int `json:"limit"` // null = remove limit
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		return
+	}
+
+	if err := h.store.SetSessionTokenLimit(keyID, req.Limit); err != nil {
+		if err.Error() == "key not found" {
+			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Key not found")
+			return
+		}
+		log.Printf("set session limit error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to set session limit")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "updated", "limit": req.Limit})
 }
 
 func min(a, b float64) float64 {

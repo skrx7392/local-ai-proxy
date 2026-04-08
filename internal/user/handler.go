@@ -85,6 +85,9 @@ func NewHandler(dataStore *store.Store) http.Handler {
 	mux.HandleFunc("POST /api/auth/register", h.register)
 	mux.HandleFunc("POST /api/auth/login", h.login)
 
+	// Service account registration (public, token-gated)
+	mux.HandleFunc("POST /api/accounts/register", h.registerServiceAccount)
+
 	// Session-authenticated routes
 	sessionAuth := SessionMiddleware(dataStore)
 	mux.Handle("POST /api/auth/logout", sessionAuth(http.HandlerFunc(h.logout)))
@@ -458,4 +461,52 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(allStats)
+}
+
+func (h *handler) registerServiceAccount(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token     string `json:"registration_token"`
+		Name      string `json:"name"`
+		RateLimit int    `json:"rate_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		return
+	}
+	if req.Token == "" || req.Name == "" {
+		proxy.WriteError(w, http.StatusBadRequest, "missing_fields", "invalid_request_error", "registration_token and name are required")
+		return
+	}
+	if req.RateLimit <= 0 {
+		req.RateLimit = 60
+	}
+
+	// Generate API key
+	rawBytes := make([]byte, 32)
+	if _, err := rand.Read(rawBytes); err != nil {
+		log.Printf("crypto/rand error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate key")
+		return
+	}
+	rawKey := "sk-" + hex.EncodeToString(rawBytes)
+	keyPrefix := rawKey[:11]
+	keyHash := auth.HashKey(rawKey)
+	tokenHash := auth.HashKey(req.Token)
+
+	accountID, keyID, creditGrant, err := h.store.RegisterServiceAccount(
+		tokenHash, req.Name, keyHash, keyPrefix, req.RateLimit)
+	if err != nil {
+		proxy.WriteError(w, http.StatusBadRequest, "registration_failed", "invalid_request_error", err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]any{
+		"account_id": accountID,
+		"key_id":     keyID,
+		"api_key":    rawKey,
+		"key_prefix": keyPrefix,
+		"credits":    creditGrant,
+	})
 }
