@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,47 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
+
+func setupTestDB(t *testing.T) *store.Store {
+	t.Helper()
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("DATABASE_URL not set, skipping integration test")
+	}
+	ctx := context.Background()
+	s, err := store.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		pool := s.Pool()
+		_, _ = pool.Exec(context.Background(), "DELETE FROM credit_holds")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM credit_transactions")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM account_usage_stats")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM credit_balances")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM credit_pricing")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM registration_tokens")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM usage_logs")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM user_sessions")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM api_keys")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM users")
+		_, _ = pool.Exec(context.Background(), "DELETE FROM accounts")
+		s.Close()
+	})
+	pool := s.Pool()
+	_, _ = pool.Exec(ctx, "DELETE FROM credit_holds")
+	_, _ = pool.Exec(ctx, "DELETE FROM credit_transactions")
+	_, _ = pool.Exec(ctx, "DELETE FROM account_usage_stats")
+	_, _ = pool.Exec(ctx, "DELETE FROM credit_balances")
+	_, _ = pool.Exec(ctx, "DELETE FROM credit_pricing")
+	_, _ = pool.Exec(ctx, "DELETE FROM registration_tokens")
+	_, _ = pool.Exec(ctx, "DELETE FROM usage_logs")
+	_, _ = pool.Exec(ctx, "DELETE FROM user_sessions")
+	_, _ = pool.Exec(ctx, "DELETE FROM api_keys")
+	_, _ = pool.Exec(ctx, "DELETE FROM users")
+	_, _ = pool.Exec(ctx, "DELETE FROM accounts")
+	return s
+}
 
 func TestWriteError(t *testing.T) {
 	rec := httptest.NewRecorder()
@@ -89,7 +132,7 @@ func TestStripTrailingSlash(t *testing.T) {
 
 func TestServeHTTP_NotFoundForUnknownPath(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler("http://localhost:11434", usageCh, 52428800)
+	h := NewHandler("http://localhost:11434", usageCh, 52428800, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/unknown/path", nil)
 	rec := httptest.NewRecorder()
@@ -115,7 +158,7 @@ func TestServeHTTP_NotFoundForUnknownPath(t *testing.T) {
 
 func TestServeHTTP_NotFoundForWrongMethod(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler("http://localhost:11434", usageCh, 52428800)
+	h := NewHandler("http://localhost:11434", usageCh, 52428800, nil)
 
 	// GET on chat/completions should be 404 (only POST is handled)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/completions", nil)
@@ -130,7 +173,7 @@ func TestServeHTTP_NotFoundForWrongMethod(t *testing.T) {
 
 func TestServeHTTP_NotFoundForPostModels(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler("http://localhost:11434", usageCh, 52428800)
+	h := NewHandler("http://localhost:11434", usageCh, 52428800, nil)
 
 	// POST on /v1/models should be 404 (only GET is handled)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/models", nil)
@@ -144,33 +187,6 @@ func TestServeHTTP_NotFoundForPostModels(t *testing.T) {
 }
 
 // --- Mock Ollama server helpers ---
-
-func mockOllamaModels() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			resp := map[string]any{
-				"object": "list",
-				"data": []map[string]any{
-					{
-						"id":       "llama3:latest",
-						"object":   "model",
-						"owned_by": "library",
-					},
-					{
-						"id":       "mistral:latest",
-						"object":   "model",
-						"owned_by": "library",
-					},
-				},
-			}
-			json.NewEncoder(w).Encode(resp)
-			return
-		}
-		http.NotFound(w, r)
-	}))
-}
 
 func mockOllamaChatNonStreaming(statusCode int, respBody map[string]any) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -231,35 +247,17 @@ func addKeyToRequest(req *http.Request, key *store.APIKey) *http.Request {
 
 // --- Models tests ---
 
-func TestHandleModels(t *testing.T) {
-	upstream := mockOllamaModels()
-	defer upstream.Close()
-
+func TestHandleModels_NilDB(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler("http://localhost:11434", usageCh, 52428800, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
-	}
-
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-	if body["object"] != "list" {
-		t.Errorf("expected object 'list', got %v", body["object"])
-	}
-	data, ok := body["data"].([]any)
-	if !ok {
-		t.Fatal("expected 'data' array")
-	}
-	if len(data) != 2 {
-		t.Errorf("expected 2 models, got %d", len(data))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 with nil db, got %d", rec.Code)
 	}
 }
 
@@ -281,7 +279,7 @@ func TestHandleChatCompletions_NonStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -344,7 +342,7 @@ func TestHandleChatCompletions_NonStreaming_NoKey(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hey"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -373,7 +371,7 @@ func TestHandleChatCompletions_Streaming(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	streamTrue := true
 	reqMeta := requestMeta{
@@ -436,7 +434,7 @@ func TestHandleChatCompletions_Streaming_NoKey(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	reqBodyBytes, _ := json.Marshal(map[string]any{
 		"model":    "llama3:latest",
@@ -473,7 +471,7 @@ func TestHandleChatCompletions_BodyTooLarge(t *testing.T) {
 
 	usageCh := make(chan store.UsageEntry, 10)
 	// Set a very small max body size
-	h := NewHandler(upstream.URL, usageCh, 10)
+	h := NewHandler(upstream.URL, usageCh, 10, nil)
 
 	// Send a body larger than 10 bytes
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"This is a long message that exceeds the body limit"}]}`
@@ -513,7 +511,7 @@ func TestHandleChatCompletions_UpstreamError500_NonStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -536,9 +534,9 @@ func TestHandleChatCompletions_UpstreamError500_NonStreaming(t *testing.T) {
 		if entry.APIKeyID != key.ID {
 			t.Errorf("expected key ID %d, got %d", key.ID, entry.APIKeyID)
 		}
-		if entry.Status != "completed" {
-			// The non-streaming handler logs "completed" regardless of upstream status
-			t.Errorf("expected status 'completed', got %q", entry.Status)
+		if entry.Status != "error" {
+			// Non-streaming handler correctly marks non-200 upstream as error
+			t.Errorf("expected status 'error', got %q", entry.Status)
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("timed out waiting for usage entry")
@@ -557,7 +555,7 @@ func TestHandleChatCompletions_UpstreamError500_Streaming(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	reqBodyBytes, _ := json.Marshal(map[string]any{
 		"model":    "llama3:latest",
@@ -598,7 +596,7 @@ func TestHandleChatCompletions_UpstreamDown_NonStreaming(t *testing.T) {
 	upstream.Close() // close immediately so connections fail
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstreamURL, usageCh, 52428800)
+	h := NewHandler(upstreamURL, usageCh, 52428800, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -632,7 +630,7 @@ func TestHandleChatCompletions_UpstreamDown_Streaming(t *testing.T) {
 	upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstreamURL, usageCh, 52428800)
+	h := NewHandler(upstreamURL, usageCh, 52428800, nil)
 
 	reqBodyBytes, _ := json.Marshal(map[string]any{
 		"model":    "llama3:latest",
@@ -744,68 +742,7 @@ func TestLogUsage_Success(t *testing.T) {
 	}
 }
 
-// --- responseRecorder tests ---
-
-func TestResponseRecorder_Write(t *testing.T) {
-	inner := httptest.NewRecorder()
-	rec := &responseRecorder{ResponseWriter: inner, body: &bytes.Buffer{}}
-
-	data := []byte("hello world")
-	n, err := rec.Write(data)
-
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	if n != len(data) {
-		t.Errorf("expected %d bytes written, got %d", len(data), n)
-	}
-
-	// Check body buffer captured the data
-	if rec.body.String() != "hello world" {
-		t.Errorf("expected body 'hello world', got %q", rec.body.String())
-	}
-
-	// Check inner writer also got the data
-	if inner.Body.String() != "hello world" {
-		t.Errorf("expected inner body 'hello world', got %q", inner.Body.String())
-	}
-}
-
-func TestResponseRecorder_WriteHeader(t *testing.T) {
-	inner := httptest.NewRecorder()
-	rec := &responseRecorder{ResponseWriter: inner, body: &bytes.Buffer{}}
-
-	rec.WriteHeader(http.StatusCreated)
-
-	if rec.statusCode != http.StatusCreated {
-		t.Errorf("expected status 201 on recorder, got %d", rec.statusCode)
-	}
-	if inner.Code != http.StatusCreated {
-		t.Errorf("expected status 201 on inner, got %d", inner.Code)
-	}
-}
-
-func TestResponseRecorder_Flush(t *testing.T) {
-	inner := httptest.NewRecorder()
-	rec := &responseRecorder{ResponseWriter: inner, body: &bytes.Buffer{}}
-
-	// Should not panic — httptest.ResponseRecorder implements Flusher
-	rec.Flush()
-
-	if !inner.Flushed {
-		t.Error("expected inner recorder to be flushed")
-	}
-}
-
-func TestResponseRecorder_Unwrap(t *testing.T) {
-	inner := httptest.NewRecorder()
-	rec := &responseRecorder{ResponseWriter: inner, body: &bytes.Buffer{}}
-
-	unwrapped := rec.Unwrap()
-	if unwrapped != inner {
-		t.Error("Unwrap should return the inner ResponseWriter")
-	}
-}
+// responseRecorder was removed — non-streaming now uses direct http.Client
 
 // --- Non-streaming with bad JSON body (best-effort parse) ---
 
@@ -818,7 +755,7 @@ func TestHandleChatCompletions_InvalidJSON(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	// Send invalid JSON that can still be read
 	reqBody := `not valid json at all`
@@ -846,7 +783,7 @@ func TestHandleChatCompletions_EmptyBody(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(""))
 	req.Header.Set("Content-Type", "application/json")
@@ -860,36 +797,6 @@ func TestHandleChatCompletions_EmptyBody(t *testing.T) {
 	}
 }
 
-// --- Streaming response with Flusher assertions ---
-
-func TestResponseRecorder_FlushNonFlusher(t *testing.T) {
-	// Create a ResponseWriter that does NOT implement Flusher
-	inner := &nonFlusherWriter{header: http.Header{}}
-	rec := &responseRecorder{ResponseWriter: inner, body: &bytes.Buffer{}}
-
-	// Should not panic
-	rec.Flush()
-}
-
-// nonFlusherWriter is an http.ResponseWriter that does not implement http.Flusher
-type nonFlusherWriter struct {
-	header     http.Header
-	statusCode int
-	body       bytes.Buffer
-}
-
-func (w *nonFlusherWriter) Header() http.Header {
-	return w.header
-}
-
-func (w *nonFlusherWriter) Write(b []byte) (int, error) {
-	return w.body.Write(b)
-}
-
-func (w *nonFlusherWriter) WriteHeader(code int) {
-	w.statusCode = code
-}
-
 // --- Test the read body error path (not "too large") ---
 
 func TestHandleChatCompletions_ReadBodyError(t *testing.T) {
@@ -897,7 +804,7 @@ func TestHandleChatCompletions_ReadBodyError(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	// Use a reader that returns an error
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", &errorReader{})
@@ -948,7 +855,7 @@ func TestHandleChatCompletions_StreamFalse(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	reqBody := `{"model":"llama3:latest","stream":false,"messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -989,7 +896,7 @@ func TestHandleChatCompletions_NonStreaming_NoUsageInResponse(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800)
+	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -1016,5 +923,282 @@ func TestHandleChatCompletions_NonStreaming_NoUsageInResponse(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("timed out waiting for usage entry")
+	}
+}
+
+// --- Credit integration tests (require DATABASE_URL) ---
+
+func TestCreditIntegration_UnknownModel_Returns400(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("model-test@example.com", "hash", "ModelTest")
+	_ = db.AddCredits(accID, 1000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, map[string]any{"id": "test"})
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	reqBody := `{"model":"unknown-model","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown model, got %d", rec.Code)
+	}
+}
+
+func TestCreditIntegration_InsufficientCredits_Returns402(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("insuff-test@example.com", "hash", "InsuffTest")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, map[string]any{"id": "test"})
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPaymentRequired {
+		t.Errorf("expected 402 for insufficient credits, got %d", rec.Code)
+	}
+}
+
+func TestCreditIntegration_SettlesAfterResponse(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("settle-test@example.com", "hash", "SettleTest")
+	_ = db.AddCredits(accID, 1000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	ollamaResp := map[string]any{
+		"id": "chatcmpl-123", "object": "chat.completion", "model": "llama3.1:8b",
+		"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "Hello!"}}},
+		"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+	}
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, ollamaResp)
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	bal, _ := db.GetCreditBalance(accID)
+	if bal.Balance >= 1000 {
+		t.Errorf("expected balance < 1000 after settlement, got %f", bal.Balance)
+	}
+	if bal.Reserved != 0 {
+		t.Errorf("expected reserved 0 after settlement, got %f", bal.Reserved)
+	}
+}
+
+func TestCreditIntegration_UpstreamError_ReleasesHold(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("release-test@example.com", "hash", "ReleaseTest")
+	_ = db.AddCredits(accID, 1000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	upstream := mockOllamaChatNonStreaming(http.StatusInternalServerError, map[string]any{"error": "internal error"})
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	bal, _ := db.GetCreditBalance(accID)
+	if bal.Balance != 1000 {
+		t.Errorf("expected balance 1000 after error release, got %f", bal.Balance)
+	}
+}
+
+func TestCreditIntegration_Models_WithDB(t *testing.T) {
+	db := setupTestDB(t)
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("qwen2.5-coder:7b", 0.002, 0.002, 500)
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler("http://localhost:11434", usageCh, 52428800, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	data := body["data"].([]any)
+	if len(data) != 2 {
+		t.Errorf("expected 2 models, got %d", len(data))
+	}
+}
+
+func TestCreditIntegration_SessionLimit_Returns429(t *testing.T) {
+	db := setupTestDB(t)
+	accID, userID, _ := db.RegisterUser("session-limit@example.com", "hash", "SessLimit")
+	_ = db.AddCredits(accID, 10000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	keyID, _ := db.CreateKeyForAccount(userID, accID, "limited-key", "hash-limited", "sk-lim00", 60)
+
+	for i := 0; i < 10; i++ {
+		_ = db.LogUsage(store.UsageEntry{APIKeyID: keyID, Model: "llama3.1:8b", TotalTokens: 1000, Status: "completed"})
+	}
+
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, map[string]any{"id": "test"})
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	sessionLimit := 5000
+	key := &store.APIKey{ID: keyID, Name: "limited-key", AccountID: &accID, SessionTokenLimit: &sessionLimit}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429 for session limit exceeded, got %d", rec.Code)
+	}
+}
+
+func TestCreditIntegration_NonStreaming_NoUsageTokens_EstimatesFromBody(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("estimate-body@example.com", "hash", "EstBody")
+	_ = db.AddCredits(accID, 1000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	// Response without usage data — tokens will be estimated from body size
+	ollamaResp := map[string]any{
+		"id": "chatcmpl-no-usage", "object": "chat.completion", "model": "llama3.1:8b",
+		"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "Hello world!"}}},
+	}
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, ollamaResp)
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	// Balance should be reduced (estimated from body)
+	bal, _ := db.GetCreditBalance(accID)
+	if bal.Balance >= 1000 {
+		t.Errorf("expected balance < 1000 after body estimation, got %f", bal.Balance)
+	}
+}
+
+func TestCreditIntegration_WithMaxTokens(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("maxtok@example.com", "hash", "MaxTok")
+	_ = db.AddCredits(accID, 1000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	ollamaResp := map[string]any{
+		"id": "chatcmpl-mt", "object": "chat.completion", "model": "llama3.1:8b",
+		"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "Hi"}}},
+		"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+	}
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, ollamaResp)
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	// Request with max_tokens set — should affect reserve estimate
+	reqBody := `{"model":"llama3.1:8b","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestCreditIntegration_StreamingSettlement(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("stream-credit@example.com", "hash", "StreamCredit")
+	_ = db.AddCredits(accID, 1000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	upstream := mockOllamaChatStreaming()
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	reqBody := `{"model":"llama3.1:8b","stream":true,"messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	bal, _ := db.GetCreditBalance(accID)
+	if bal.Balance >= 1000 {
+		t.Errorf("expected balance < 1000 after streaming settlement, got %f", bal.Balance)
 	}
 }
