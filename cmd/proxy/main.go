@@ -83,8 +83,9 @@ func main() {
 	}
 
 	limiter := ratelimit.New()
-	proxyHandler := proxy.NewHandler(cfg.OllamaURL, usageCh, cfg.MaxRequestBody)
+	proxyHandler := proxy.NewHandler(cfg.OllamaURL, usageCh, cfg.MaxRequestBody, db)
 	authMiddleware := auth.Middleware(db)
+	creditGate := credits.CreditGate(db)
 	rateLimitMiddleware := ratelimit.Middleware(limiter)
 	cors := middleware.CORS(cfg.CORSOrigins)
 	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh)
@@ -98,8 +99,8 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Client API — CORS + auth + rate limit + proxy
-	mux.Handle("/api/v1/", cors(authMiddleware(rateLimitMiddleware(proxyHandler))))
+	// Client API — CORS + auth + credit gate + rate limit + proxy
+	mux.Handle("/api/v1/", cors(authMiddleware(creditGate(rateLimitMiddleware(proxyHandler)))))
 
 	// Admin — no CORS
 	mux.Handle("/api/admin/", adminHandler)

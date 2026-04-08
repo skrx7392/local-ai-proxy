@@ -4,30 +4,33 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/credits"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
 type handler struct {
-	ollamaURL    *url.URL
-	reverseProxy *httputil.ReverseProxy
-	client       *http.Client
-	usageCh      chan<- store.UsageEntry
-	maxBody      int64
+	ollamaURL *url.URL
+	client    *http.Client
+	usageCh   chan<- store.UsageEntry
+	maxBody   int64
+	db        *store.Store // nil = credits disabled
 }
 
 // requestMeta holds fields peeked from the request body.
 type requestMeta struct {
-	Model  string `json:"model"`
-	Stream *bool  `json:"stream"`
+	Model               string `json:"model"`
+	Stream              *bool  `json:"stream"`
+	MaxTokens           *int   `json:"max_tokens"`
+	MaxCompletionTokens *int   `json:"max_completion_tokens"`
 }
 
 // usageData is extracted from Ollama's response for logging.
@@ -40,20 +43,10 @@ type usageData struct {
 	} `json:"usage"`
 }
 
-func NewHandler(ollamaRawURL string, usageCh chan<- store.UsageEntry, maxBody int64) http.Handler {
+func NewHandler(ollamaRawURL string, usageCh chan<- store.UsageEntry, maxBody int64, db *store.Store) http.Handler {
 	target, err := url.Parse(ollamaRawURL)
 	if err != nil {
 		log.Fatalf("invalid OLLAMA_URL: %v", err)
-	}
-
-	reverseProxy := httputil.NewSingleHostReverseProxy(target)
-	reverseProxy.Director = func(req *http.Request) {
-		req.URL.Scheme = target.Scheme
-		req.URL.Host = target.Host
-		req.Host = target.Host
-		req.Header.Del("Authorization")
-		// Strip /api prefix — upstream Ollama expects /v1/... paths
-		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api")
 	}
 
 	client := &http.Client{
@@ -61,16 +54,15 @@ func NewHandler(ollamaRawURL string, usageCh chan<- store.UsageEntry, maxBody in
 	}
 
 	return &handler{
-		ollamaURL:    target,
-		reverseProxy: reverseProxy,
-		client:       client,
-		usageCh:      usageCh,
-		maxBody:      maxBody,
+		ollamaURL: target,
+		client:    client,
+		usageCh:   usageCh,
+		maxBody:   maxBody,
+		db:        db,
 	}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Only allow specific endpoints
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/chat/completions":
 		h.handleChatCompletions(w, r)
@@ -82,8 +74,38 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
-	// Straight passthrough via reverse proxy
-	h.reverseProxy.ServeHTTP(w, r)
+	if h.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "server_error", "Model listing unavailable")
+		return
+	}
+
+	pricing, err := h.db.ListActivePricing()
+	if err != nil {
+		log.Printf("list pricing error: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list models")
+		return
+	}
+
+	type modelEntry struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		OwnedBy string `json:"owned_by"`
+	}
+
+	models := make([]modelEntry, len(pricing))
+	for i, p := range pricing {
+		models[i] = modelEntry{
+			ID:      p.ModelID,
+			Object:  "model",
+			OwnedBy: "local",
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"object": "list",
+		"data":   models,
+	})
 }
 
 func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -101,74 +123,98 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid_request_error", "Failed to read request body")
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	var meta requestMeta
 	json.Unmarshal(body, &meta) // best-effort parse
 
-	isStream := meta.Stream != nil && *meta.Stream
+	// --- Credit enforcement (only for keys with AccountID) ---
+	var holdID int64
+	var pricing *store.CreditPricing
+	creditEnabled := key != nil && key.AccountID != nil && h.db != nil
 
-	if isStream {
-		h.handleStreaming(w, r, body, meta.Model, key, start)
-	} else {
-		h.handleNonStreaming(w, r, meta.Model, key, start)
-	}
-}
-
-func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, model string, key *store.APIKey, start time.Time) {
-	// Use a response recorder to tee the response for usage extraction
-	rec := &responseRecorder{ResponseWriter: w, body: &bytes.Buffer{}}
-
-	h.reverseProxy.ModifyResponse = func(resp *http.Response) error {
-		// Read the response body for observation
-		respBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+	if creditEnabled {
+		// Model allowlist: reject unpriced models
+		pricing, err = h.db.GetPricingByModel(meta.Model)
 		if err != nil {
-			resp.Body = io.NopCloser(bytes.NewReader(nil))
-			return nil
+			log.Printf("pricing lookup error: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to check model pricing")
+			return
+		}
+		if pricing == nil {
+			writeError(w, http.StatusBadRequest, "unknown_model", "invalid_request_error",
+				fmt.Sprintf("Model %q is not available", meta.Model))
+			return
 		}
 
-		// Extract usage data
-		var ud usageData
-		if json.Unmarshal(respBody, &ud) == nil && ud.Usage.TotalTokens > 0 {
-			h.logUsage(key, ud, time.Since(start), "completed")
-		} else if key != nil {
-			// Log with 0 tokens if extraction failed
-			ud.Model = model
-			h.logUsage(key, ud, time.Since(start), "completed")
+		// Session limit check (best-effort)
+		if key.SessionTokenLimit != nil {
+			maxTokens := meta.MaxTokens
+			if maxTokens == nil {
+				maxTokens = meta.MaxCompletionTokens
+			}
+			estimatedPrompt := credits.EstimatePromptTokens(len(body))
+			stats, _ := h.db.GetAccountUsageStats(*key.AccountID, meta.Model)
+			estimatedCompletion := credits.EstimateCompletionTokens(maxTokens, stats, pricing)
+			estimatedTotal := estimatedPrompt + estimatedCompletion
+
+			consumed, oldest, err := h.db.GetSessionTokenUsage(key.ID, 6*time.Hour)
+			if err != nil {
+				log.Printf("session usage error: %v", err)
+			} else if consumed+estimatedTotal > *key.SessionTokenLimit {
+				retryAfter := 6 * time.Hour
+				if oldest != nil {
+					retryAfter = time.Until(oldest.Add(6 * time.Hour))
+					if retryAfter < 0 {
+						retryAfter = time.Second
+					}
+				}
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())))
+				writeError(w, http.StatusTooManyRequests, "session_limit_exceeded", "rate_limit_error",
+					"Session token limit exceeded")
+				return
+			}
 		}
 
-		// Pass through unmodified
-		resp.Body = io.NopCloser(bytes.NewReader(respBody))
-		resp.ContentLength = int64(len(respBody))
-		return nil
+		// Estimate cost and reserve
+		maxTok := meta.MaxTokens
+		if maxTok == nil {
+			maxTok = meta.MaxCompletionTokens
+		}
+		promptEst := credits.EstimatePromptTokens(len(body))
+		stats, _ := h.db.GetAccountUsageStats(*key.AccountID, meta.Model)
+		completionEst := credits.EstimateCompletionTokens(maxTok, stats, pricing)
+		reserveAmount := credits.EstimateCost(pricing, promptEst, completionEst)
+
+		holdID, err = h.db.ReserveCredits(*key.AccountID, reserveAmount)
+		if err != nil {
+			writeError(w, http.StatusPaymentRequired, "insufficient_credits", "invalid_request_error",
+				"Insufficient credits for this request")
+			return
+		}
 	}
 
-	h.reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("proxy error: %v", err)
-		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
-		}
-		writeError(w, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
+	isStream := meta.Stream != nil && *meta.Stream
+	if isStream {
+		h.handleStreaming(w, r, body, meta.Model, key, start, holdID, creditEnabled, pricing)
+	} else {
+		h.handleNonStreaming(w, r, body, meta.Model, key, start, holdID, creditEnabled, pricing)
 	}
-
-	h.reverseProxy.ServeHTTP(rec, r)
 }
 
-func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body []byte, model string, key *store.APIKey, start time.Time) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "server_error", "Streaming not supported")
-		return
-	}
+func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, body []byte,
+	model string, key *store.APIKey, start time.Time,
+	holdID int64, creditEnabled bool, pricing *store.CreditPricing) {
 
-	// Build upstream request with context propagation
+	// Build upstream request (direct http.Client, no shared reverseProxy)
 	upstreamURL := *h.ollamaURL
 	upstreamURL.Path = "/v1/chat/completions"
 
 	ctx := r.Context()
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL.String(), bytes.NewReader(body))
 	if err != nil {
+		if creditEnabled {
+			h.db.ReleaseHold(holdID)
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create upstream request")
 		return
 	}
@@ -176,8 +222,101 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 
 	resp, err := h.client.Do(upReq)
 	if err != nil {
+		if creditEnabled {
+			h.db.ReleaseHold(holdID)
+		}
 		if ctx.Err() != nil {
-			// Client disconnected
+			if key != nil {
+				h.logUsage(key, usageData{Model: model}, time.Since(start), "partial")
+			}
+			return
+		}
+		log.Printf("upstream error: %v", err)
+		if key != nil {
+			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
+		}
+		writeError(w, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		if creditEnabled {
+			h.db.ReleaseHold(holdID)
+		}
+		log.Printf("read response error: %v", err)
+		if key != nil {
+			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
+		}
+		writeError(w, http.StatusBadGateway, "upstream_error", "server_error", "Failed to read upstream response")
+		return
+	}
+
+	// Extract usage data
+	var ud usageData
+	ud.Model = model
+	status := "completed"
+	if resp.StatusCode != http.StatusOK {
+		status = "error"
+	} else {
+		json.Unmarshal(respBody, &ud)
+	}
+
+	// Credit settlement
+	if creditEnabled {
+		h.settleCredits(holdID, key, &ud, len(respBody), status, pricing)
+	}
+
+	// Log usage
+	if key != nil {
+		h.logUsage(key, ud, time.Since(start), status)
+	}
+
+	// Write response to client
+	for hk, hv := range resp.Header {
+		for _, v := range hv {
+			w.Header().Add(hk, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
+}
+
+func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body []byte,
+	model string, key *store.APIKey, start time.Time,
+	holdID int64, creditEnabled bool, pricing *store.CreditPricing) {
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		if creditEnabled {
+			h.db.ReleaseHold(holdID)
+		}
+		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "server_error", "Streaming not supported")
+		return
+	}
+
+	upstreamURL := *h.ollamaURL
+	upstreamURL.Path = "/v1/chat/completions"
+
+	ctx := r.Context()
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL.String(), bytes.NewReader(body))
+	if err != nil {
+		if creditEnabled {
+			h.db.ReleaseHold(holdID)
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create upstream request")
+		return
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := h.client.Do(upReq)
+	if err != nil {
+		if creditEnabled {
+			h.db.ReleaseHold(holdID)
+		}
+		if ctx.Err() != nil {
 			if key != nil {
 				h.logUsage(key, usageData{Model: model}, time.Since(start), "partial")
 			}
@@ -201,9 +340,11 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 	w.WriteHeader(resp.StatusCode)
 
 	if resp.StatusCode != http.StatusOK {
-		// Non-200 from upstream — pass through the error body
 		io.Copy(w, resp.Body)
 		flusher.Flush()
+		if creditEnabled {
+			h.db.ReleaseHold(holdID)
+		}
 		if key != nil {
 			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
 		}
@@ -215,19 +356,20 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 	ud.Model = model
 	lineReader := bufio.NewReader(resp.Body)
 	status := "completed"
+	bytesWritten := 0
 
 	for {
 		line, err := lineReader.ReadBytes('\n')
 		if len(line) > 0 {
 			w.Write(line)
 			flusher.Flush()
+			bytesWritten += len(line)
 
 			// Observe: look for usage in the line (non-destructive)
 			trimmed := bytes.TrimSpace(line)
 			if bytes.HasPrefix(trimmed, []byte("data: ")) {
 				data := bytes.TrimPrefix(trimmed, []byte("data: "))
 				if !bytes.Equal(data, []byte("[DONE]")) {
-					// Try to extract usage from this chunk
 					var chunk struct {
 						Usage *struct {
 							PromptTokens     int `json:"prompt_tokens"`
@@ -257,8 +399,66 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 		}
 	}
 
+	// Credit settlement
+	if creditEnabled {
+		h.settleStreamCredits(holdID, key, &ud, bytesWritten, status, pricing)
+	}
+
 	if key != nil {
 		h.logUsage(key, ud, time.Since(start), status)
+	}
+}
+
+// settleCredits handles credit settlement for non-streaming responses.
+func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, respBodyLen int, status string, pricing *store.CreditPricing) {
+	if status == "error" && respBodyLen == 0 {
+		h.db.ReleaseHold(holdID)
+		return
+	}
+
+	promptTokens := ud.Usage.PromptTokens
+	completionTokens := ud.Usage.CompletionTokens
+
+	// Fallback: estimate from response body size if token extraction failed
+	if ud.Usage.TotalTokens == 0 && respBodyLen > 0 {
+		completionTokens = credits.EstimateFromResponseBytes(respBodyLen)
+		promptTokens = 0 // prompt cost was in the reserve estimate
+	}
+
+	actualCost := credits.EstimateCost(pricing, promptTokens, completionTokens)
+	if err := h.db.SettleHold(holdID, actualCost); err != nil {
+		log.Printf("settle hold error: %v", err)
+	}
+
+	// Update usage stats for future estimates
+	if key != nil && key.AccountID != nil && completionTokens > 0 {
+		h.db.UpdateAccountUsageStats(*key.AccountID, ud.Model, completionTokens)
+	}
+}
+
+// settleStreamCredits handles credit settlement for streaming responses.
+func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usageData, bytesWritten int, status string, pricing *store.CreditPricing) {
+	if status == "error" && bytesWritten == 0 {
+		h.db.ReleaseHold(holdID)
+		return
+	}
+
+	promptTokens := ud.Usage.PromptTokens
+	completionTokens := ud.Usage.CompletionTokens
+
+	// Fallback: estimate from bytes written if token extraction failed
+	if ud.Usage.TotalTokens == 0 && bytesWritten > 0 {
+		completionTokens = credits.EstimateFromResponseBytes(bytesWritten)
+		promptTokens = 0
+	}
+
+	actualCost := credits.EstimateCost(pricing, promptTokens, completionTokens)
+	if err := h.db.SettleHold(holdID, actualCost); err != nil {
+		log.Printf("settle hold error: %v", err)
+	}
+
+	if key != nil && key.AccountID != nil && completionTokens > 0 {
+		h.db.UpdateAccountUsageStats(*key.AccountID, ud.Model, completionTokens)
 	}
 }
 
@@ -275,7 +475,6 @@ func (h *handler) logUsage(key *store.APIKey, ud usageData, duration time.Durati
 		DurationMs:       duration.Milliseconds(),
 		Status:           status,
 	}
-	// Non-blocking send — drop if full
 	select {
 	case h.usageCh <- entry:
 	default:
@@ -294,35 +493,6 @@ func writeError(w http.ResponseWriter, statusCode int, code, errType, message st
 		},
 	}
 	json.NewEncoder(w).Encode(resp)
-}
-
-// responseRecorder wraps ResponseWriter to capture the body for observation.
-type responseRecorder struct {
-	http.ResponseWriter
-	body       *bytes.Buffer
-	statusCode int
-}
-
-func (r *responseRecorder) WriteHeader(code int) {
-	r.statusCode = code
-	r.ResponseWriter.WriteHeader(code)
-}
-
-func (r *responseRecorder) Write(b []byte) (int, error) {
-	r.body.Write(b)
-	return r.ResponseWriter.Write(b)
-}
-
-// Flush implements http.Flusher for the recorder.
-func (r *responseRecorder) Flush() {
-	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-// Unwrap allows http.ResponseController to access the underlying ResponseWriter.
-func (r *responseRecorder) Unwrap() http.ResponseWriter {
-	return r.ResponseWriter
 }
 
 // WriteError is exported for use by other packages.
