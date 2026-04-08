@@ -116,6 +116,9 @@ func main() {
 	mux.Handle("/api/auth/", cors(userHandler))
 	mux.Handle("/api/users/", cors(userHandler))
 
+	// Service account registration — CORS, public (token-gated internally)
+	mux.Handle("/api/accounts/", cors(userHandler))
+
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
 		Handler:     mux,

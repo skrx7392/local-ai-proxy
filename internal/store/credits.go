@@ -408,6 +408,188 @@ func (s *Store) UpdateAccountUsageStats(accountID int64, model string, completio
 	return err
 }
 
+// CreateRegistrationToken inserts a new registration token.
+func (s *Store) CreateRegistrationToken(name, tokenHash string, creditGrant float64, maxUses int, expiresAt *time.Time) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(
+		context.Background(),
+		`INSERT INTO registration_tokens (name, token_hash, credit_grant, max_uses, expires_at)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		name, tokenHash, creditGrant, maxUses, expiresAt,
+	).Scan(&id)
+	return id, err
+}
+
+// ListRegistrationTokens returns all registration tokens.
+func (s *Store) ListRegistrationTokens() ([]RegistrationToken, error) {
+	rows, err := s.pool.Query(
+		context.Background(),
+		`SELECT id, name, token_hash, credit_grant, max_uses, uses, created_at, expires_at, revoked
+		 FROM registration_tokens ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []RegistrationToken
+	for rows.Next() {
+		var t RegistrationToken
+		if err := rows.Scan(&t.ID, &t.Name, &t.TokenHash, &t.CreditGrant, &t.MaxUses, &t.Uses,
+			&t.CreatedAt, &t.ExpiresAt, &t.Revoked); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
+}
+
+// RevokeRegistrationToken marks a token as revoked.
+func (s *Store) RevokeRegistrationToken(id int64) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE registration_tokens SET revoked = TRUE WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("registration token not found")
+	}
+	return nil
+}
+
+// RegisterServiceAccount atomically: validates+consumes token, creates service account,
+// inits credit balance, grants credits, creates API key. Returns (accountID, keyID, creditGrant, err).
+func (s *Store) RegisterServiceAccount(tokenHash, name, keyHash, keyPrefix string, rateLimit int) (int64, int64, float64, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Atomically validate and consume the token
+	var creditGrant float64
+	err = tx.QueryRow(ctx,
+		`UPDATE registration_tokens
+		 SET uses = uses + 1
+		 WHERE token_hash = $1 AND NOT revoked AND uses < max_uses
+		   AND (expires_at IS NULL OR expires_at > NOW())
+		 RETURNING credit_grant`, tokenHash,
+	).Scan(&creditGrant)
+	if err == pgx.ErrNoRows {
+		return 0, 0, 0, fmt.Errorf("invalid, expired, or exhausted registration token")
+	}
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("consume token: %w", err)
+	}
+
+	// Create service account
+	var accountID int64
+	err = tx.QueryRow(ctx,
+		`INSERT INTO accounts (name, type) VALUES ($1, 'service') RETURNING id`, name,
+	).Scan(&accountID)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("create account: %w", err)
+	}
+
+	// Init credit balance
+	_, err = tx.Exec(ctx,
+		`INSERT INTO credit_balances (account_id) VALUES ($1)`, accountID)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("init balance: %w", err)
+	}
+
+	// Grant credits from token
+	if creditGrant > 0 {
+		_, err = tx.Exec(ctx,
+			`UPDATE credit_balances SET balance = $1, updated_at = NOW() WHERE account_id = $2`,
+			creditGrant, accountID)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("grant credits: %w", err)
+		}
+		_, err = tx.Exec(ctx,
+			`INSERT INTO credit_transactions (account_id, amount, balance_after, type, description)
+			 VALUES ($1, $2, $2, 'grant', 'registration token grant')`,
+			accountID, creditGrant)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("insert grant transaction: %w", err)
+		}
+	}
+
+	// Create API key
+	var keyID int64
+	err = tx.QueryRow(ctx,
+		`INSERT INTO api_keys (name, key_hash, key_prefix, rate_limit, account_id)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		name, keyHash, keyPrefix, rateLimit, accountID,
+	).Scan(&keyID)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("create key: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, 0, fmt.Errorf("commit: %w", err)
+	}
+	return accountID, keyID, creditGrant, nil
+}
+
+// SetSessionTokenLimit sets the session token limit for a key. Use nil to remove the limit.
+func (s *Store) SetSessionTokenLimit(keyID int64, limit *int) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE api_keys SET session_token_limit = $1 WHERE id = $2`, limit, keyID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("key not found")
+	}
+	return nil
+}
+
+// ListAccountsWithBalances returns all accounts with their credit balances.
+func (s *Store) ListAccountsWithBalances() ([]struct {
+	Account
+	Balance  float64
+	Reserved float64
+}, error) {
+	rows, err := s.pool.Query(
+		context.Background(),
+		`SELECT a.id, a.name, a.type, a.is_active, a.created_at,
+		        COALESCE(cb.balance, 0), COALESCE(cb.reserved, 0)
+		 FROM accounts a
+		 LEFT JOIN credit_balances cb ON cb.account_id = a.id
+		 ORDER BY a.id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type AccountWithBalance struct {
+		Account
+		Balance  float64
+		Reserved float64
+	}
+	var results []struct {
+		Account
+		Balance  float64
+		Reserved float64
+	}
+	for rows.Next() {
+		var r struct {
+			Account
+			Balance  float64
+			Reserved float64
+		}
+		if err := rows.Scan(&r.ID, &r.Name, &r.Type, &r.IsActive, &r.CreatedAt,
+			&r.Balance, &r.Reserved); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 // GetSessionTokenUsage returns total tokens consumed by a key within a time window,
 // plus the oldest usage entry timestamp (for Retry-After calculation).
 func (s *Store) GetSessionTokenUsage(keyID int64, window time.Duration) (consumed int, oldest *time.Time, err error) {

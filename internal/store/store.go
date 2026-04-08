@@ -525,6 +525,17 @@ func (s *Store) CreateKeyForAccount(userID, accountID int64, name, keyHash, keyP
 	return id, err
 }
 
+// CreateKeyForAccountOnly creates an API key for an account without a user (admin/service created).
+func (s *Store) CreateKeyForAccountOnly(accountID int64, name, keyHash, keyPrefix string, rateLimit int) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(
+		context.Background(),
+		`INSERT INTO api_keys (name, key_hash, key_prefix, rate_limit, account_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		name, keyHash, keyPrefix, rateLimit, accountID,
+	).Scan(&id)
+	return id, err
+}
+
 // RegisterUser atomically creates a personal account and user in one transaction.
 // Returns (accountID, userID, err).
 func (s *Store) RegisterUser(email, passwordHash, name string) (int64, int64, error) {
