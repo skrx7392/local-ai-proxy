@@ -21,12 +21,16 @@ func setupTestStore(t *testing.T) *Store {
 	}
 
 	t.Cleanup(func() {
-		// Drop tables so each test starts clean
+		// Drop tables in FK dependency order
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS usage_logs")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS user_sessions")
 		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS user_id")
+		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS account_id")
+		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS session_token_limit")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS api_keys")
+		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE users DROP COLUMN IF EXISTS account_id")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS users")
+		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS accounts")
 		s.Close()
 	})
 
@@ -35,6 +39,7 @@ func setupTestStore(t *testing.T) *Store {
 	_, _ = s.pool.Exec(ctx, "DELETE FROM user_sessions")
 	_, _ = s.pool.Exec(ctx, "DELETE FROM api_keys")
 	_, _ = s.pool.Exec(ctx, "DELETE FROM users")
+	_, _ = s.pool.Exec(ctx, "DELETE FROM accounts")
 
 	return s
 }
@@ -54,8 +59,12 @@ func TestNew(t *testing.T) {
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS usage_logs")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS user_sessions")
 		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS user_id")
+		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS account_id")
+		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS session_token_limit")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS api_keys")
+		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE users DROP COLUMN IF EXISTS account_id")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS users")
+		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS accounts")
 		s.Close()
 	})
 
@@ -579,6 +588,284 @@ func TestDeleteUserSessions(t *testing.T) {
 	s2, _ := s.GetSessionByTokenHash("hash-2")
 	if s1 != nil || s2 != nil {
 		t.Fatal("expected all sessions deleted")
+	}
+}
+
+// --- Account tests ---
+
+func TestCreateAccount(t *testing.T) {
+	s := setupTestStore(t)
+
+	id, err := s.CreateAccount("Test Account", "personal")
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if id <= 0 {
+		t.Fatalf("expected positive id, got %d", id)
+	}
+}
+
+func TestGetAccountByID(t *testing.T) {
+	s := setupTestStore(t)
+
+	id, _ := s.CreateAccount("My Account", "service")
+
+	acc, err := s.GetAccountByID(id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected account, got nil")
+	}
+	if acc.Name != "My Account" {
+		t.Errorf("expected name 'My Account', got %q", acc.Name)
+	}
+	if acc.Type != "service" {
+		t.Errorf("expected type 'service', got %q", acc.Type)
+	}
+	if !acc.IsActive {
+		t.Error("expected is_active=true")
+	}
+}
+
+func TestGetAccountByID_NotFound(t *testing.T) {
+	s := setupTestStore(t)
+
+	acc, err := s.GetAccountByID(999999)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if acc != nil {
+		t.Fatalf("expected nil for nonexistent id, got %+v", acc)
+	}
+}
+
+func TestListAccounts(t *testing.T) {
+	s := setupTestStore(t)
+
+	_, _ = s.CreateAccount("Acc1", "personal")
+	_, _ = s.CreateAccount("Acc2", "service")
+
+	accounts, err := s.ListAccounts()
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("expected 2 accounts, got %d", len(accounts))
+	}
+}
+
+func TestSetAccountActive(t *testing.T) {
+	s := setupTestStore(t)
+
+	id, _ := s.CreateAccount("Toggle", "personal")
+
+	if err := s.SetAccountActive(id, false); err != nil {
+		t.Fatalf("SetAccountActive(false): %v", err)
+	}
+	acc, _ := s.GetAccountByID(id)
+	if acc.IsActive {
+		t.Error("expected is_active=false")
+	}
+
+	if err := s.SetAccountActive(id, true); err != nil {
+		t.Fatalf("SetAccountActive(true): %v", err)
+	}
+	acc, _ = s.GetAccountByID(id)
+	if !acc.IsActive {
+		t.Error("expected is_active=true")
+	}
+}
+
+func TestSetAccountActive_NotFound(t *testing.T) {
+	s := setupTestStore(t)
+
+	err := s.SetAccountActive(999999, false)
+	if err == nil {
+		t.Fatal("expected error for non-existent account")
+	}
+}
+
+func TestRegisterUser(t *testing.T) {
+	s := setupTestStore(t)
+
+	accountID, userID, err := s.RegisterUser("reg@example.com", "hashed-pw", "Registered")
+	if err != nil {
+		t.Fatalf("RegisterUser: %v", err)
+	}
+	if accountID <= 0 {
+		t.Fatalf("expected positive accountID, got %d", accountID)
+	}
+	if userID <= 0 {
+		t.Fatalf("expected positive userID, got %d", userID)
+	}
+
+	// Verify account was created
+	acc, err := s.GetAccountByID(accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected account, got nil")
+	}
+	if acc.Type != "personal" {
+		t.Errorf("expected type 'personal', got %q", acc.Type)
+	}
+	if acc.Name != "Registered" {
+		t.Errorf("expected name 'Registered', got %q", acc.Name)
+	}
+
+	// Verify user has account_id set
+	user, err := s.GetUserByID(userID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if user.AccountID == nil {
+		t.Fatal("expected user.AccountID to be set")
+	}
+	if *user.AccountID != accountID {
+		t.Errorf("expected user.AccountID=%d, got %d", accountID, *user.AccountID)
+	}
+}
+
+func TestRegisterUser_DuplicateEmail(t *testing.T) {
+	s := setupTestStore(t)
+
+	_, _, err := s.RegisterUser("dup-reg@example.com", "hash", "First")
+	if err != nil {
+		t.Fatalf("first RegisterUser: %v", err)
+	}
+
+	_, _, err = s.RegisterUser("dup-reg@example.com", "hash2", "Second")
+	if err == nil {
+		t.Fatal("expected error for duplicate email")
+	}
+}
+
+func TestBackfillAccounts(t *testing.T) {
+	s := setupTestStore(t)
+
+	// Create a legacy user without account_id
+	userID, err := s.CreateUser("legacy@example.com", "hash", "Legacy")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Create a key for this user
+	keyID, err := s.CreateKeyForUser(userID, "legacy-key", "hash-legacy-key", "sk-leg", 60)
+	if err != nil {
+		t.Fatalf("CreateKeyForUser: %v", err)
+	}
+
+	// Verify no account_id yet
+	user, _ := s.GetUserByID(userID)
+	if user.AccountID != nil {
+		t.Fatal("expected nil AccountID before backfill")
+	}
+
+	// Run backfill
+	if err := s.BackfillAccounts(); err != nil {
+		t.Fatalf("BackfillAccounts: %v", err)
+	}
+
+	// Verify user now has account_id
+	user, _ = s.GetUserByID(userID)
+	if user.AccountID == nil {
+		t.Fatal("expected AccountID after backfill")
+	}
+
+	// Verify account was created
+	acc, _ := s.GetAccountByID(*user.AccountID)
+	if acc == nil {
+		t.Fatal("expected account to exist")
+	}
+	if acc.Name != "Legacy" {
+		t.Errorf("expected account name 'Legacy', got %q", acc.Name)
+	}
+	if acc.Type != "personal" {
+		t.Errorf("expected type 'personal', got %q", acc.Type)
+	}
+
+	// Verify key now has account_id
+	key, _ := s.GetKeyByHash("hash-legacy-key")
+	if key == nil {
+		t.Fatal("expected key")
+	}
+	if key.AccountID == nil {
+		t.Fatal("expected key.AccountID after backfill")
+	}
+	if *key.AccountID != *user.AccountID {
+		t.Errorf("expected key.AccountID=%d, got %d", *user.AccountID, *key.AccountID)
+	}
+	_ = keyID // used for creation above
+}
+
+func TestBackfillAccounts_Idempotent(t *testing.T) {
+	s := setupTestStore(t)
+
+	_, _ = s.CreateUser("idem@example.com", "hash", "Idempotent")
+
+	// Run twice — should not error or create duplicate accounts
+	if err := s.BackfillAccounts(); err != nil {
+		t.Fatalf("first BackfillAccounts: %v", err)
+	}
+	if err := s.BackfillAccounts(); err != nil {
+		t.Fatalf("second BackfillAccounts: %v", err)
+	}
+
+	accounts, _ := s.ListAccounts()
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 account after two backfills, got %d", len(accounts))
+	}
+}
+
+func TestCreateKeyForAccount(t *testing.T) {
+	s := setupTestStore(t)
+
+	accountID, userID, _ := s.RegisterUser("keyed@example.com", "hash", "Keyed")
+
+	keyID, err := s.CreateKeyForAccount(userID, accountID, "acc-key", "hash-acc-key", "sk-acc", 100)
+	if err != nil {
+		t.Fatalf("CreateKeyForAccount: %v", err)
+	}
+	if keyID <= 0 {
+		t.Fatalf("expected positive keyID, got %d", keyID)
+	}
+
+	// Verify key has both user_id and account_id
+	key, _ := s.GetKeyByHash("hash-acc-key")
+	if key == nil {
+		t.Fatal("expected key")
+	}
+	if key.UserID == nil || *key.UserID != userID {
+		t.Errorf("expected UserID=%d, got %v", userID, key.UserID)
+	}
+	if key.AccountID == nil || *key.AccountID != accountID {
+		t.Errorf("expected AccountID=%d, got %v", accountID, key.AccountID)
+	}
+}
+
+func TestGetKeyByHash_WithAllFields(t *testing.T) {
+	s := setupTestStore(t)
+
+	// Create key via admin (no user_id, no account_id)
+	_, _ = s.CreateKey("admin-key", "hash-admin", "sk-adm", 60)
+
+	key, err := s.GetKeyByHash("hash-admin")
+	if err != nil {
+		t.Fatalf("GetKeyByHash: %v", err)
+	}
+	if key == nil {
+		t.Fatal("expected key")
+	}
+	if key.UserID != nil {
+		t.Errorf("expected nil UserID for admin key, got %v", key.UserID)
+	}
+	if key.AccountID != nil {
+		t.Errorf("expected nil AccountID for admin key, got %v", key.AccountID)
+	}
+	if key.SessionTokenLimit != nil {
+		t.Errorf("expected nil SessionTokenLimit, got %v", key.SessionTokenLimit)
 	}
 }
 
