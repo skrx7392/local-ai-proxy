@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -26,37 +27,39 @@ func SessionMiddleware(db *store.Store) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extractSessionToken(r)
 			if token == "" {
-				proxy.WriteError(w, http.StatusUnauthorized, "missing_session", "invalid_request_error", "Missing session token")
+				proxy.WriteError(w, r, http.StatusUnauthorized, "missing_session", "invalid_request_error", "Missing session token")
 				return
 			}
 
 			tokenHash := auth.HashKey(token)
 			session, err := db.GetSessionByTokenHash(tokenHash)
 			if err != nil {
-				proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Internal error")
+				proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Internal error")
 				return
 			}
 			if session == nil {
-				proxy.WriteError(w, http.StatusUnauthorized, "invalid_session", "invalid_request_error", "Invalid or expired session")
+				proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_session", "invalid_request_error", "Invalid or expired session")
 				return
 			}
 
 			// Check expiry
 			if time.Now().After(session.ExpiresAt) {
 				// Clean up expired session
-				_ = db.DeleteSession(tokenHash)
-				proxy.WriteError(w, http.StatusUnauthorized, "session_expired", "invalid_request_error", "Session has expired")
+				if err := db.DeleteSession(tokenHash); err != nil {
+					slog.WarnContext(r.Context(), "failed to delete expired session", "error", err)
+				}
+				proxy.WriteError(w, r, http.StatusUnauthorized, "session_expired", "invalid_request_error", "Session has expired")
 				return
 			}
 
 			// Load user
 			user, err := db.GetUserByID(session.UserID)
 			if err != nil || user == nil {
-				proxy.WriteError(w, http.StatusUnauthorized, "user_not_found", "invalid_request_error", "User not found")
+				proxy.WriteError(w, r, http.StatusUnauthorized, "user_not_found", "invalid_request_error", "User not found")
 				return
 			}
 			if !user.IsActive {
-				proxy.WriteError(w, http.StatusForbidden, "account_disabled", "invalid_request_error", "Account is disabled")
+				proxy.WriteError(w, r, http.StatusForbidden, "account_disabled", "invalid_request_error", "Account is disabled")
 				return
 			}
 

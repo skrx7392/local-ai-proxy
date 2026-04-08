@@ -14,6 +14,7 @@ type Config struct {
 	CORSOrigins        string
 	MaxRequestBody     int64
 	DefaultCreditGrant float64
+	LogLevel           string
 }
 
 func Load() (Config, error) {
@@ -53,6 +54,7 @@ func Load() (Config, error) {
 		CORSOrigins:        envOrDefault("CORS_ORIGINS", "*"),
 		MaxRequestBody:     maxBody,
 		DefaultCreditGrant: defaultCreditGrant,
+		LogLevel:           envOrDefault("LOG_LEVEL", "info"),
 	}, nil
 }
 

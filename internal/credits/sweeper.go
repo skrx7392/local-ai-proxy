@@ -2,7 +2,7 @@ package credits
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/krishna/local-ai-proxy/internal/store"
@@ -27,9 +27,9 @@ func StartSweeper(ctx context.Context, db *store.Store,
 			case <-ticker.C:
 				released, err := db.SweepStaleHolds(staleThreshold)
 				if err != nil {
-					log.Printf("sweep stale holds error: %v", err)
+					slog.Error("sweep stale holds error", "error", err)
 				} else if released > 0 {
-					log.Printf("released %d stale credit holds", released)
+					slog.Info("released stale credit holds", "count", released)
 				}
 			}
 		}
@@ -46,9 +46,9 @@ func StartSweeper(ctx context.Context, db *store.Store,
 			case <-ticker.C:
 				deleted, err := db.CleanupSettledHolds(cleanupAge)
 				if err != nil {
-					log.Printf("cleanup settled holds error: %v", err)
+					slog.Error("cleanup settled holds error", "error", err)
 				} else if deleted > 0 {
-					log.Printf("cleaned up %d old credit holds", deleted)
+					slog.Info("cleaned up old credit holds", "count", deleted)
 				}
 			}
 		}

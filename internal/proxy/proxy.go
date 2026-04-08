@@ -6,14 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/krishna/local-ai-proxy/internal/apierror"
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/credits"
+	"github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
@@ -22,7 +24,8 @@ type handler struct {
 	client    *http.Client
 	usageCh   chan<- store.UsageEntry
 	maxBody   int64
-	db        *store.Store // nil = credits disabled
+	db        *store.Store      // nil = credits disabled
+	metrics   *metrics.Metrics  // nil = metrics disabled
 }
 
 // requestMeta holds fields peeked from the request body.
@@ -43,22 +46,14 @@ type usageData struct {
 	} `json:"usage"`
 }
 
-func NewHandler(ollamaRawURL string, usageCh chan<- store.UsageEntry, maxBody int64, db *store.Store) http.Handler {
-	target, err := url.Parse(ollamaRawURL)
-	if err != nil {
-		log.Fatalf("invalid OLLAMA_URL: %v", err)
-	}
-
-	client := &http.Client{
-		Timeout: 5 * time.Minute,
-	}
-
+func NewHandler(ollamaURL *url.URL, usageCh chan<- store.UsageEntry, maxBody int64, db *store.Store, m *metrics.Metrics) http.Handler {
 	return &handler{
-		ollamaURL: target,
-		client:    client,
+		ollamaURL: ollamaURL,
+		client:    &http.Client{Timeout: 5 * time.Minute},
 		usageCh:   usageCh,
 		maxBody:   maxBody,
 		db:        db,
+		metrics:   m,
 	}
 }
 
@@ -69,20 +64,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/models":
 		h.handleModels(w, r)
 	default:
-		writeError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Not found")
+		writeError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Not found")
 	}
 }
 
 func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	if h.db == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "server_error", "Model listing unavailable")
+		writeError(w, r, http.StatusServiceUnavailable, "unavailable", "server_error", "Model listing unavailable")
 		return
 	}
 
 	pricing, err := h.db.ListActivePricing()
 	if err != nil {
-		log.Printf("list pricing error: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list models")
+		slog.ErrorContext(r.Context(), "list pricing error", "error", err)
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list models")
 		return
 	}
 
@@ -117,10 +112,10 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if err.Error() == "http: request body too large" {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "invalid_request_error", "Request body too large")
+			writeError(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "invalid_request_error", "Request body too large")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid_request", "invalid_request_error", "Failed to read request body")
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "invalid_request_error", "Failed to read request body")
 		return
 	}
 
@@ -136,12 +131,12 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		// Model allowlist: reject unpriced models
 		pricing, err = h.db.GetPricingByModel(meta.Model)
 		if err != nil {
-			log.Printf("pricing lookup error: %v", err)
-			writeError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to check model pricing")
+			slog.ErrorContext(r.Context(), "pricing lookup error", "error", err, "model", meta.Model)
+			writeError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to check model pricing")
 			return
 		}
 		if pricing == nil {
-			writeError(w, http.StatusBadRequest, "unknown_model", "invalid_request_error",
+			writeError(w, r, http.StatusBadRequest, "unknown_model", "invalid_request_error",
 				fmt.Sprintf("Model %q is not available", meta.Model))
 			return
 		}
@@ -153,13 +148,16 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				maxTokens = meta.MaxCompletionTokens
 			}
 			estimatedPrompt := credits.EstimatePromptTokens(len(body))
-			stats, _ := h.db.GetAccountUsageStats(*key.AccountID, meta.Model)
+			stats, statsErr := h.db.GetAccountUsageStats(*key.AccountID, meta.Model)
+			if statsErr != nil {
+				slog.WarnContext(r.Context(), "session usage stats lookup error", "error", statsErr, "account_id", *key.AccountID, "model", meta.Model)
+			}
 			estimatedCompletion := credits.EstimateCompletionTokens(maxTokens, stats, pricing)
 			estimatedTotal := estimatedPrompt + estimatedCompletion
 
 			consumed, oldest, err := h.db.GetSessionTokenUsage(key.ID, 6*time.Hour)
 			if err != nil {
-				log.Printf("session usage error: %v", err)
+				slog.ErrorContext(r.Context(), "session usage error", "error", err, "api_key_id", key.ID)
 			} else if consumed+estimatedTotal > *key.SessionTokenLimit {
 				retryAfter := 6 * time.Hour
 				if oldest != nil {
@@ -169,7 +167,7 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 					}
 				}
 				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())))
-				writeError(w, http.StatusTooManyRequests, "session_limit_exceeded", "rate_limit_error",
+				writeError(w, r, http.StatusTooManyRequests, "session_limit_exceeded", "rate_limit_error",
 					"Session token limit exceeded")
 				return
 			}
@@ -181,13 +179,16 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			maxTok = meta.MaxCompletionTokens
 		}
 		promptEst := credits.EstimatePromptTokens(len(body))
-		stats, _ := h.db.GetAccountUsageStats(*key.AccountID, meta.Model)
+		stats, statsErr := h.db.GetAccountUsageStats(*key.AccountID, meta.Model)
+		if statsErr != nil {
+			slog.WarnContext(r.Context(), "usage stats lookup error", "error", statsErr, "account_id", *key.AccountID, "model", meta.Model)
+		}
 		completionEst := credits.EstimateCompletionTokens(maxTok, stats, pricing)
 		reserveAmount := credits.EstimateCost(pricing, promptEst, completionEst)
 
 		holdID, err = h.db.ReserveCredits(*key.AccountID, reserveAmount)
 		if err != nil {
-			writeError(w, http.StatusPaymentRequired, "insufficient_credits", "invalid_request_error",
+			writeError(w, r, http.StatusPaymentRequired, "insufficient_credits", "invalid_request_error",
 				"Insufficient credits for this request")
 			return
 		}
@@ -215,7 +216,7 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 		if creditEnabled {
 			h.db.ReleaseHold(holdID)
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create upstream request")
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create upstream request")
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
@@ -231,11 +232,11 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 			}
 			return
 		}
-		log.Printf("upstream error: %v", err)
+		slog.ErrorContext(ctx, "upstream error", "error", err, "model", model)
 		if key != nil {
 			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
 		}
-		writeError(w, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
+		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
 		return
 	}
 	defer resp.Body.Close()
@@ -246,11 +247,11 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 		if creditEnabled {
 			h.db.ReleaseHold(holdID)
 		}
-		log.Printf("read response error: %v", err)
+		slog.ErrorContext(ctx, "read response error", "error", err, "model", model)
 		if key != nil {
 			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
 		}
-		writeError(w, http.StatusBadGateway, "upstream_error", "server_error", "Failed to read upstream response")
+		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to read upstream response")
 		return
 	}
 
@@ -274,10 +275,11 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 		}
 	}
 
-	// Log usage
+	// Log usage and record metrics
 	if key != nil {
 		h.logUsage(key, ud, time.Since(start), status)
 	}
+	h.metrics.RecordTokens(model, ud.Usage.PromptTokens, ud.Usage.CompletionTokens)
 
 	// Write response to client
 	for hk, hv := range resp.Header {
@@ -298,7 +300,7 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 		if creditEnabled {
 			h.db.ReleaseHold(holdID)
 		}
-		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "server_error", "Streaming not supported")
+		writeError(w, r, http.StatusInternalServerError, "streaming_unsupported", "server_error", "Streaming not supported")
 		return
 	}
 
@@ -311,7 +313,7 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 		if creditEnabled {
 			h.db.ReleaseHold(holdID)
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create upstream request")
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create upstream request")
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
@@ -327,11 +329,11 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 			}
 			return
 		}
-		log.Printf("upstream error: %v", err)
+		slog.ErrorContext(ctx, "upstream error", "error", err, "model", model, "stream", true)
 		if key != nil {
 			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
 		}
-		writeError(w, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
+		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
 		return
 	}
 	defer resp.Body.Close()
@@ -397,7 +399,7 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 					status = "partial"
 				} else {
 					status = "error"
-					log.Printf("stream read error: %v", err)
+					slog.ErrorContext(ctx, "stream read error", "error", err, "model", model)
 				}
 			}
 			break
@@ -412,6 +414,7 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 	if key != nil {
 		h.logUsage(key, ud, time.Since(start), status)
 	}
+	h.metrics.RecordTokens(model, ud.Usage.PromptTokens, ud.Usage.CompletionTokens)
 }
 
 // settleCredits handles credit settlement for non-streaming responses.
@@ -428,12 +431,14 @@ func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, 
 
 	actualCost := credits.EstimateCost(pricing, promptTokens, completionTokens)
 	if err := h.db.SettleHold(holdID, actualCost); err != nil {
-		log.Printf("settle hold error: %v", err)
+		slog.Error("settle hold error", "error", err, "hold_id", holdID)
 	}
 
 	// Update usage stats for future estimates
 	if key != nil && key.AccountID != nil && completionTokens > 0 {
-		h.db.UpdateAccountUsageStats(*key.AccountID, ud.Model, completionTokens)
+		if err := h.db.UpdateAccountUsageStats(*key.AccountID, ud.Model, completionTokens); err != nil {
+			slog.Warn("update usage stats error", "error", err, "account_id", *key.AccountID, "model", ud.Model)
+		}
 	}
 }
 
@@ -455,11 +460,13 @@ func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usage
 
 	actualCost := credits.EstimateCost(pricing, promptTokens, completionTokens)
 	if err := h.db.SettleHold(holdID, actualCost); err != nil {
-		log.Printf("settle hold error: %v", err)
+		slog.Error("settle hold error", "error", err, "hold_id", holdID, "stream", true)
 	}
 
 	if key != nil && key.AccountID != nil && completionTokens > 0 {
-		h.db.UpdateAccountUsageStats(*key.AccountID, ud.Model, completionTokens)
+		if err := h.db.UpdateAccountUsageStats(*key.AccountID, ud.Model, completionTokens); err != nil {
+			slog.Warn("update usage stats error", "error", err, "account_id", *key.AccountID, "model", ud.Model)
+		}
 	}
 }
 
@@ -479,26 +486,18 @@ func (h *handler) logUsage(key *store.APIKey, ud usageData, duration time.Durati
 	select {
 	case h.usageCh <- entry:
 	default:
-		log.Println("usage channel full, dropping entry")
+		slog.Warn("usage channel full, dropping entry", "model", ud.Model, "api_key_id", key.ID)
 	}
 }
 
-func writeError(w http.ResponseWriter, statusCode int, code, errType, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	resp := map[string]any{
-		"error": map[string]any{
-			"message": message,
-			"type":    errType,
-			"code":    code,
-		},
-	}
-	json.NewEncoder(w).Encode(resp)
+func writeError(w http.ResponseWriter, r *http.Request, statusCode int, code, errType, message string) {
+	apierror.WriteError(w, r, statusCode, code, errType, message)
 }
 
 // WriteError is exported for use by other packages.
-func WriteError(w http.ResponseWriter, statusCode int, code, errType, message string) {
-	writeError(w, statusCode, code, errType, message)
+// Deprecated: Use apierror.WriteError directly for new code.
+func WriteError(w http.ResponseWriter, r *http.Request, statusCode int, code, errType, message string) {
+	apierror.WriteError(w, r, statusCode, code, errType, message)
 }
 
 // StripTrailingSlash removes a single trailing slash if the path has more than just "/".

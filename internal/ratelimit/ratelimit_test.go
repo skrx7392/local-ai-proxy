@@ -245,7 +245,7 @@ func TestMiddleware_NoKeyInContext(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := Middleware(l)(next)
+	mw := Middleware(l, nil)(next)
 
 	// Request with no auth key in context
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
@@ -270,7 +270,7 @@ func TestMiddleware_AllowedRequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := Middleware(l)(next)
+	mw := Middleware(l, nil)(next)
 
 	key := &store.APIKey{
 		ID:        1,
@@ -300,7 +300,7 @@ func TestMiddleware_RateLimited(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := Middleware(l)(next)
+	mw := Middleware(l, nil)(next)
 
 	key := &store.APIKey{
 		ID:        1,
