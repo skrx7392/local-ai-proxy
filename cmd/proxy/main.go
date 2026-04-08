@@ -82,6 +82,13 @@ func main() {
 		log.Fatalf("seed pricing: %v", err)
 	}
 
+	// Start credit hold sweeper goroutines
+	sweeperCtx, sweeperCancel := context.WithCancel(context.Background())
+	credits.StartSweeper(sweeperCtx, db,
+		10*time.Minute, 10*time.Minute, // stale hold sweep every 10 min
+		6*time.Hour, 30*24*time.Hour, // cleanup old holds every 6 hrs
+	)
+
 	limiter := ratelimit.New()
 	proxyHandler := proxy.NewHandler(cfg.OllamaURL, usageCh, cfg.MaxRequestBody, db)
 	authMiddleware := auth.Middleware(db)
@@ -134,6 +141,9 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
+
+	// Stop sweeper goroutines
+	sweeperCancel()
 
 	// Stop usage writer and drain
 	writerCancel()
