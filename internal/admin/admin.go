@@ -5,7 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -92,18 +92,18 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		provided := r.Header.Get("X-Admin-Key")
 		if provided == "" {
-			proxy.WriteError(w, http.StatusUnauthorized, "missing_admin_key", "invalid_api_key", "Missing X-Admin-Key header")
+			proxy.WriteError(w, r, http.StatusUnauthorized, "missing_admin_key", "invalid_api_key", "Missing X-Admin-Key header")
 			return
 		}
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.adminKey)) != 1 {
-			proxy.WriteError(w, http.StatusUnauthorized, "invalid_admin_key", "invalid_api_key", "Invalid admin key")
+			proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_admin_key", "invalid_api_key", "Invalid admin key")
 			return
 		}
 
 		// Admin rate limiting: 10 req/min
 		if !h.adminAllow() {
 			w.Header().Set("Retry-After", "6")
-			proxy.WriteError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Admin rate limit exceeded")
+			proxy.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Admin rate limit exceeded")
 			return
 		}
 
@@ -130,11 +130,11 @@ func (h *handler) adminAllow() bool {
 func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 	var req createKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
 		return
 	}
 	if req.Name == "" {
-		proxy.WriteError(w, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
 		return
 	}
 	if req.RateLimit <= 0 {
@@ -144,8 +144,8 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 	// Generate random key
 	rawBytes := make([]byte, 32)
 	if _, err := rand.Read(rawBytes); err != nil {
-		log.Printf("crypto/rand error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate key")
+		slog.ErrorContext(r.Context(), "crypto/rand error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate key")
 		return
 	}
 	rawKey := "sk-" + hex.EncodeToString(rawBytes)
@@ -154,8 +154,8 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 
 	id, err := h.store.CreateKey(req.Name, keyHash, keyPrefix, req.RateLimit)
 	if err != nil {
-		log.Printf("create key error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create key")
+		slog.ErrorContext(r.Context(), "create key error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create key")
 		return
 	}
 
@@ -173,8 +173,8 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := h.store.ListKeys()
 	if err != nil {
-		log.Printf("list keys error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list keys")
+		slog.ErrorContext(r.Context(), "list keys error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list keys")
 		return
 	}
 
@@ -198,17 +198,17 @@ func (h *handler) revokeKey(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid key ID")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid key ID")
 		return
 	}
 
 	if err := h.store.RevokeKey(id); err != nil {
 		if err.Error() == "key not found" {
-			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Key not found")
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Key not found")
 			return
 		}
-		log.Printf("revoke key error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to revoke key")
+		slog.ErrorContext(r.Context(), "revoke key error", "error", err, "key_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to revoke key")
 		return
 	}
 
@@ -223,7 +223,7 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("key_id"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
-			proxy.WriteError(w, http.StatusBadRequest, "invalid_key_id", "invalid_request_error", "Invalid key_id parameter")
+			proxy.WriteError(w, r, http.StatusBadRequest, "invalid_key_id", "invalid_request_error", "Invalid key_id parameter")
 			return
 		}
 		keyID = &id
@@ -235,7 +235,7 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 			// Try date-only format
 			t, err = time.Parse("2006-01-02", v)
 			if err != nil {
-				proxy.WriteError(w, http.StatusBadRequest, "invalid_since", "invalid_request_error", "Invalid since parameter (use RFC3339 or YYYY-MM-DD)")
+				proxy.WriteError(w, r, http.StatusBadRequest, "invalid_since", "invalid_request_error", "Invalid since parameter (use RFC3339 or YYYY-MM-DD)")
 				return
 			}
 		}
@@ -244,8 +244,8 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 
 	stats, err := h.store.GetUsageStats(keyID, since)
 	if err != nil {
-		log.Printf("usage stats error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get usage stats")
+		slog.ErrorContext(r.Context(), "usage stats error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get usage stats")
 		return
 	}
 
@@ -256,8 +256,8 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 func (h *handler) listUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.store.ListUsers()
 	if err != nil {
-		log.Printf("list users error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list users")
+		slog.ErrorContext(r.Context(), "list users error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list users")
 		return
 	}
 
@@ -298,17 +298,17 @@ func (h *handler) setUserActiveHandler(w http.ResponseWriter, r *http.Request, a
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid user ID")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid user ID")
 		return
 	}
 
 	if err := h.store.SetUserActive(id, active); err != nil {
 		if err.Error() == "user not found" {
-			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "User not found")
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "User not found")
 			return
 		}
-		log.Printf("set user active error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update user")
+		slog.ErrorContext(r.Context(), "set user active error", "error", err, "user_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update user")
 		return
 	}
 
@@ -325,8 +325,8 @@ func (h *handler) setUserActiveHandler(w http.ResponseWriter, r *http.Request, a
 func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	accounts, err := h.store.ListAccountsWithBalances()
 	if err != nil {
-		log.Printf("list accounts error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list accounts")
+		slog.ErrorContext(r.Context(), "list accounts error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list accounts")
 		return
 	}
 
@@ -362,7 +362,7 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 func (h *handler) grantCredits(w http.ResponseWriter, r *http.Request) {
 	accountID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid account ID")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid account ID")
 		return
 	}
 
@@ -371,17 +371,17 @@ func (h *handler) grantCredits(w http.ResponseWriter, r *http.Request) {
 		Description string  `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
 		return
 	}
 	if req.Amount == 0 {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_amount", "invalid_request_error", "amount must be non-zero")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_amount", "invalid_request_error", "amount must be non-zero")
 		return
 	}
 
 	if err := h.store.AddCredits(accountID, req.Amount, req.Description); err != nil {
-		log.Printf("grant credits error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to grant credits")
+		slog.ErrorContext(r.Context(), "grant credits error", "error", err, "account_id", accountID)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to grant credits")
 		return
 	}
 
@@ -397,17 +397,17 @@ func (h *handler) grantCredits(w http.ResponseWriter, r *http.Request) {
 func (h *handler) createAccountKey(w http.ResponseWriter, r *http.Request) {
 	accountID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid account ID")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid account ID")
 		return
 	}
 
 	var req createKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
 		return
 	}
 	if req.Name == "" {
-		proxy.WriteError(w, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
 		return
 	}
 	if req.RateLimit <= 0 {
@@ -416,8 +416,8 @@ func (h *handler) createAccountKey(w http.ResponseWriter, r *http.Request) {
 
 	rawBytes := make([]byte, 32)
 	if _, err := rand.Read(rawBytes); err != nil {
-		log.Printf("crypto/rand error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate key")
+		slog.ErrorContext(r.Context(), "crypto/rand error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate key")
 		return
 	}
 	rawKey := "sk-" + hex.EncodeToString(rawBytes)
@@ -426,8 +426,8 @@ func (h *handler) createAccountKey(w http.ResponseWriter, r *http.Request) {
 
 	id, err := h.store.CreateKeyForAccountOnly(accountID, req.Name, keyHash, keyPrefix, req.RateLimit)
 	if err != nil {
-		log.Printf("create account key error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create key")
+		slog.ErrorContext(r.Context(), "create account key error", "error", err, "account_id", accountID)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create key")
 		return
 	}
 
@@ -452,11 +452,11 @@ func (h *handler) createRegistrationToken(w http.ResponseWriter, r *http.Request
 		ExpiresAt   *string `json:"expires_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
 		return
 	}
 	if req.Name == "" {
-		proxy.WriteError(w, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
 		return
 	}
 	if req.MaxUses <= 0 {
@@ -466,8 +466,8 @@ func (h *handler) createRegistrationToken(w http.ResponseWriter, r *http.Request
 	// Generate token
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
-		log.Printf("crypto/rand error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate token")
+		slog.ErrorContext(r.Context(), "crypto/rand error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to generate token")
 		return
 	}
 	rawToken := "reg-" + hex.EncodeToString(tokenBytes)
@@ -477,7 +477,7 @@ func (h *handler) createRegistrationToken(w http.ResponseWriter, r *http.Request
 	if req.ExpiresAt != nil {
 		t, err := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if err != nil {
-			proxy.WriteError(w, http.StatusBadRequest, "invalid_expires_at", "invalid_request_error", "expires_at must be RFC3339")
+			proxy.WriteError(w, r, http.StatusBadRequest, "invalid_expires_at", "invalid_request_error", "expires_at must be RFC3339")
 			return
 		}
 		expiresAt = &t
@@ -485,8 +485,8 @@ func (h *handler) createRegistrationToken(w http.ResponseWriter, r *http.Request
 
 	id, err := h.store.CreateRegistrationToken(req.Name, tokenHash, req.CreditGrant, req.MaxUses, expiresAt)
 	if err != nil {
-		log.Printf("create registration token error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create token")
+		slog.ErrorContext(r.Context(), "create registration token error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create token")
 		return
 	}
 
@@ -504,8 +504,8 @@ func (h *handler) createRegistrationToken(w http.ResponseWriter, r *http.Request
 func (h *handler) listRegistrationTokens(w http.ResponseWriter, r *http.Request) {
 	tokens, err := h.store.ListRegistrationTokens()
 	if err != nil {
-		log.Printf("list registration tokens error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list tokens")
+		slog.ErrorContext(r.Context(), "list registration tokens error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list tokens")
 		return
 	}
 
@@ -545,17 +545,17 @@ func (h *handler) listRegistrationTokens(w http.ResponseWriter, r *http.Request)
 func (h *handler) revokeRegistrationToken(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid token ID")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid token ID")
 		return
 	}
 
 	if err := h.store.RevokeRegistrationToken(id); err != nil {
 		if err.Error() == "registration token not found" {
-			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Token not found")
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Token not found")
 			return
 		}
-		log.Printf("revoke registration token error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to revoke token")
+		slog.ErrorContext(r.Context(), "revoke registration token error", "error", err, "token_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to revoke token")
 		return
 	}
 
@@ -568,8 +568,8 @@ func (h *handler) revokeRegistrationToken(w http.ResponseWriter, r *http.Request
 func (h *handler) listPricing(w http.ResponseWriter, r *http.Request) {
 	pricing, err := h.store.ListActivePricing()
 	if err != nil {
-		log.Printf("list pricing error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list pricing")
+		slog.ErrorContext(r.Context(), "list pricing error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list pricing")
 		return
 	}
 
@@ -585,15 +585,15 @@ func (h *handler) upsertPricing(w http.ResponseWriter, r *http.Request) {
 		TypicalCompletion int     `json:"typical_completion"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
 		return
 	}
 	if req.ModelID == "" {
-		proxy.WriteError(w, http.StatusBadRequest, "missing_model_id", "invalid_request_error", "model_id is required")
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_model_id", "invalid_request_error", "model_id is required")
 		return
 	}
 	if req.PromptRate <= 0 || req.CompletionRate <= 0 {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_rates", "invalid_request_error", "prompt_rate and completion_rate must be positive")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_rates", "invalid_request_error", "prompt_rate and completion_rate must be positive")
 		return
 	}
 	if req.TypicalCompletion <= 0 {
@@ -601,8 +601,8 @@ func (h *handler) upsertPricing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.UpsertPricing(req.ModelID, req.PromptRate, req.CompletionRate, req.TypicalCompletion); err != nil {
-		log.Printf("upsert pricing error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update pricing")
+		slog.ErrorContext(r.Context(), "upsert pricing error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update pricing")
 		return
 	}
 
@@ -613,17 +613,17 @@ func (h *handler) upsertPricing(w http.ResponseWriter, r *http.Request) {
 func (h *handler) deletePricing(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid pricing ID")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid pricing ID")
 		return
 	}
 
 	if err := h.store.DeletePricing(id); err != nil {
 		if err.Error() == "pricing not found" {
-			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Pricing not found")
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Pricing not found")
 			return
 		}
-		log.Printf("delete pricing error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to delete pricing")
+		slog.ErrorContext(r.Context(), "delete pricing error", "error", err, "pricing_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to delete pricing")
 		return
 	}
 
@@ -636,7 +636,7 @@ func (h *handler) deletePricing(w http.ResponseWriter, r *http.Request) {
 func (h *handler) setSessionLimit(w http.ResponseWriter, r *http.Request) {
 	keyID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid key ID")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid key ID")
 		return
 	}
 
@@ -644,17 +644,17 @@ func (h *handler) setSessionLimit(w http.ResponseWriter, r *http.Request) {
 		Limit *int `json:"limit"` // null = remove limit
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
 		return
 	}
 
 	if err := h.store.SetSessionTokenLimit(keyID, req.Limit); err != nil {
 		if err.Error() == "key not found" {
-			proxy.WriteError(w, http.StatusNotFound, "not_found", "invalid_request_error", "Key not found")
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Key not found")
 			return
 		}
-		log.Printf("set session limit error: %v", err)
-		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to set session limit")
+		slog.ErrorContext(r.Context(), "set session limit error", "error", err, "key_id", keyID)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to set session limit")
 		return
 	}
 

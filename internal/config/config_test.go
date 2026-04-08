@@ -37,6 +37,7 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("OLLAMA_URL", "")
 	t.Setenv("CORS_ORIGINS", "")
 	t.Setenv("MAX_REQUEST_BODY", "")
+	t.Setenv("LOG_LEVEL", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -60,6 +61,23 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.DatabaseURL != "postgres://localhost/testdb" {
 		t.Errorf("expected DatabaseURL, got %q", cfg.DatabaseURL)
+	}
+	if cfg.LogLevel != "info" {
+		t.Errorf("expected default LogLevel 'info', got %q", cfg.LogLevel)
+	}
+}
+
+func TestLoad_CustomLogLevel(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("LOG_LEVEL", "debug")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("expected LogLevel 'debug', got %q", cfg.LogLevel)
 	}
 }
 

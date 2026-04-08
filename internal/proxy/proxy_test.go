@@ -8,14 +8,25 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/logging"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
+
+func mustParseURL(t *testing.T, rawURL string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse URL %q: %v", rawURL, err)
+	}
+	return u
+}
 
 func setupTestDB(t *testing.T) *store.Store {
 	t.Helper()
@@ -60,7 +71,8 @@ func setupTestDB(t *testing.T) *store.Store {
 
 func TestWriteError(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteError(rec, http.StatusBadRequest, "invalid_request", "invalid_request_error", "Bad request")
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	WriteError(rec, req, http.StatusBadRequest, "invalid_request", "invalid_request_error", "Bad request")
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400, got %d", rec.Code)
@@ -89,11 +101,44 @@ func TestWriteError(t *testing.T) {
 	if errObj["code"] != "invalid_request" {
 		t.Errorf("expected code 'invalid_request', got %v", errObj["code"])
 	}
+
+	// No request_id in context → no request_id in response
+	if _, exists := body["request_id"]; exists {
+		t.Error("expected no request_id when context has none")
+	}
+}
+
+func TestWriteError_WithRequestID(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	ctx := logging.WithRequestID(req.Context(), "req_test123")
+	req = req.WithContext(ctx)
+
+	WriteError(rec, req, http.StatusBadRequest, "invalid_request", "invalid_request_error", "Bad request")
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to parse response body: %v", err)
+	}
+
+	if body["request_id"] != "req_test123" {
+		t.Errorf("expected request_id 'req_test123', got %v", body["request_id"])
+	}
+
+	// Verify error object is still present
+	errObj, ok := body["error"].(map[string]any)
+	if !ok {
+		t.Fatal("expected 'error' object in response")
+	}
+	if errObj["code"] != "invalid_request" {
+		t.Errorf("expected code 'invalid_request', got %v", errObj["code"])
+	}
 }
 
 func TestWriteError_NotFound(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteError(rec, http.StatusNotFound, "not_found", "invalid_request_error", "Not found")
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	WriteError(rec, req, http.StatusNotFound, "not_found", "invalid_request_error", "Not found")
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected status 404, got %d", rec.Code)
@@ -102,7 +147,8 @@ func TestWriteError_NotFound(t *testing.T) {
 
 func TestWriteError_InternalError(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteError(rec, http.StatusInternalServerError, "internal_error", "server_error", "Internal error")
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	WriteError(rec, req, http.StatusInternalServerError, "internal_error", "server_error", "Internal error")
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("expected status 500, got %d", rec.Code)
@@ -132,7 +178,7 @@ func TestStripTrailingSlash(t *testing.T) {
 
 func TestServeHTTP_NotFoundForUnknownPath(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler("http://localhost:11434", usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, "http://localhost:11434"), usageCh, 52428800, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/unknown/path", nil)
 	rec := httptest.NewRecorder()
@@ -158,7 +204,7 @@ func TestServeHTTP_NotFoundForUnknownPath(t *testing.T) {
 
 func TestServeHTTP_NotFoundForWrongMethod(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler("http://localhost:11434", usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, "http://localhost:11434"), usageCh, 52428800, nil, nil)
 
 	// GET on chat/completions should be 404 (only POST is handled)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/completions", nil)
@@ -173,7 +219,7 @@ func TestServeHTTP_NotFoundForWrongMethod(t *testing.T) {
 
 func TestServeHTTP_NotFoundForPostModels(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler("http://localhost:11434", usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, "http://localhost:11434"), usageCh, 52428800, nil, nil)
 
 	// POST on /v1/models should be 404 (only GET is handled)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/models", nil)
@@ -249,7 +295,7 @@ func addKeyToRequest(req *http.Request, key *store.APIKey) *http.Request {
 
 func TestHandleModels_NilDB(t *testing.T) {
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler("http://localhost:11434", usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, "http://localhost:11434"), usageCh, 52428800, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -279,7 +325,7 @@ func TestHandleChatCompletions_NonStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -342,7 +388,7 @@ func TestHandleChatCompletions_NonStreaming_NoKey(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hey"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -371,7 +417,7 @@ func TestHandleChatCompletions_Streaming(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	streamTrue := true
 	reqMeta := requestMeta{
@@ -434,7 +480,7 @@ func TestHandleChatCompletions_Streaming_NoKey(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	reqBodyBytes, _ := json.Marshal(map[string]any{
 		"model":    "llama3:latest",
@@ -471,7 +517,7 @@ func TestHandleChatCompletions_BodyTooLarge(t *testing.T) {
 
 	usageCh := make(chan store.UsageEntry, 10)
 	// Set a very small max body size
-	h := NewHandler(upstream.URL, usageCh, 10, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 10, nil, nil)
 
 	// Send a body larger than 10 bytes
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"This is a long message that exceeds the body limit"}]}`
@@ -511,7 +557,7 @@ func TestHandleChatCompletions_UpstreamError500_NonStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -555,7 +601,7 @@ func TestHandleChatCompletions_UpstreamError500_Streaming(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	reqBodyBytes, _ := json.Marshal(map[string]any{
 		"model":    "llama3:latest",
@@ -596,7 +642,7 @@ func TestHandleChatCompletions_UpstreamDown_NonStreaming(t *testing.T) {
 	upstream.Close() // close immediately so connections fail
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstreamURL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstreamURL), usageCh, 52428800, nil, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -630,7 +676,7 @@ func TestHandleChatCompletions_UpstreamDown_Streaming(t *testing.T) {
 	upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstreamURL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstreamURL), usageCh, 52428800, nil, nil)
 
 	reqBodyBytes, _ := json.Marshal(map[string]any{
 		"model":    "llama3:latest",
@@ -755,7 +801,7 @@ func TestHandleChatCompletions_InvalidJSON(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	// Send invalid JSON that can still be read
 	reqBody := `not valid json at all`
@@ -783,7 +829,7 @@ func TestHandleChatCompletions_EmptyBody(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(""))
 	req.Header.Set("Content-Type", "application/json")
@@ -804,7 +850,7 @@ func TestHandleChatCompletions_ReadBodyError(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	// Use a reader that returns an error
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", &errorReader{})
@@ -855,7 +901,7 @@ func TestHandleChatCompletions_StreamFalse(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	reqBody := `{"model":"llama3:latest","stream":false,"messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -896,7 +942,7 @@ func TestHandleChatCompletions_NonStreaming_NoUsageInResponse(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, nil)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, nil, nil)
 
 	reqBody := `{"model":"llama3:latest","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -938,7 +984,7 @@ func TestCreditIntegration_UnknownModel_Returns400(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
 
 	reqBody := `{"model":"unknown-model","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -963,7 +1009,7 @@ func TestCreditIntegration_InsufficientCredits_Returns402(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
 
 	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -994,7 +1040,7 @@ func TestCreditIntegration_SettlesAfterResponse(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
 
 	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -1028,7 +1074,7 @@ func TestCreditIntegration_UpstreamError_ReleasesHold(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
 
 	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -1051,7 +1097,7 @@ func TestCreditIntegration_Models_WithDB(t *testing.T) {
 	_ = db.UpsertPricing("qwen2.5-coder:7b", 0.002, 0.002, 500)
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler("http://localhost:11434", usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, "http://localhost:11434"), usageCh, 52428800, db, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -1085,7 +1131,7 @@ func TestCreditIntegration_SessionLimit_Returns429(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
 
 	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -1118,7 +1164,7 @@ func TestCreditIntegration_NonStreaming_NoUsageTokens_EstimatesFromBody(t *testi
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
 
 	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
@@ -1155,7 +1201,7 @@ func TestCreditIntegration_WithMaxTokens(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
 
 	// Request with max_tokens set — should affect reserve estimate
 	reqBody := `{"model":"llama3.1:8b","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
@@ -1182,7 +1228,7 @@ func TestCreditIntegration_StreamingSettlement(t *testing.T) {
 	defer upstream.Close()
 
 	usageCh := make(chan store.UsageEntry, 10)
-	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
 
 	reqBody := `{"model":"llama3.1:8b","stream":true,"messages":[{"role":"user","content":"Hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))

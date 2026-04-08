@@ -12,6 +12,10 @@ spec:
     metadata:
       labels:
         app: ai-proxy
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: ai-proxy
@@ -36,15 +40,17 @@ spec:
                 secretKeyRef:
                   name: proxy-secret
                   key: ADMIN_KEY
+            - name: LOG_LEVEL
+              value: "info"
           livenessProbe:
             httpGet:
-              path: /api/healthz
+              path: /api/healthz/live
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 30
           readinessProbe:
             httpGet:
-              path: /api/healthz
+              path: /api/healthz/ready
               port: 8080
             initialDelaySeconds: 2
             periodSeconds: 10

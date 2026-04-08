@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -12,9 +14,13 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/config"
 	"github.com/krishna/local-ai-proxy/internal/credits"
+	"github.com/krishna/local-ai-proxy/internal/health"
+	"github.com/krishna/local-ai-proxy/internal/logging"
+	appmetrics "github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/middleware"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
+	"github.com/krishna/local-ai-proxy/internal/requestid"
 	"github.com/krishna/local-ai-proxy/internal/store"
 	"github.com/krishna/local-ai-proxy/internal/user"
 )
@@ -22,12 +28,27 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		slog.Error("config error", "error", err)
+		os.Exit(1)
+	}
+
+	logger, err := logging.Setup(cfg.LogLevel)
+	if err != nil {
+		slog.Error("invalid log level", "error", err)
+		os.Exit(1)
+	}
+	slog.SetDefault(logger)
+
+	ollamaURL, err := url.Parse(cfg.OllamaURL)
+	if err != nil {
+		slog.Error("invalid OLLAMA_URL", "error", err)
+		os.Exit(1)
 	}
 
 	db, err := store.New(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("store: %v", err)
+		slog.Error("store error", "error", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
@@ -46,7 +67,7 @@ func main() {
 					return
 				}
 				if err := db.LogUsage(entry); err != nil {
-					log.Printf("usage log error: %v", err)
+					slog.Error("usage log error", "error", err)
 				}
 			case <-writerCtx.Done():
 				// Drain remaining entries
@@ -57,7 +78,7 @@ func main() {
 							return
 						}
 						if err := db.LogUsage(entry); err != nil {
-							log.Printf("usage log error (drain): %v", err)
+							slog.Error("usage log error (drain)", "error", err)
 						}
 					default:
 						return
@@ -69,17 +90,20 @@ func main() {
 
 	// Backfill accounts for existing users (idempotent)
 	if err := db.BackfillAccounts(); err != nil {
-		log.Fatalf("backfill accounts: %v", err)
+		slog.Error("backfill accounts error", "error", err)
+		os.Exit(1)
 	}
 
 	// Backfill credit balances for accounts that lack one
 	if err := db.BackfillCreditBalances(); err != nil {
-		log.Fatalf("backfill credit balances: %v", err)
+		slog.Error("backfill credit balances error", "error", err)
+		os.Exit(1)
 	}
 
 	// Seed default model pricing (idempotent)
 	if err := credits.SeedDefaultPricing(db); err != nil {
-		log.Fatalf("seed pricing: %v", err)
+		slog.Error("seed pricing error", "error", err)
+		os.Exit(1)
 	}
 
 	// Start credit hold sweeper goroutines
@@ -89,25 +113,32 @@ func main() {
 		6*time.Hour, 30*24*time.Hour, // cleanup old holds every 6 hrs
 	)
 
+	m := appmetrics.New(func() int { return len(usageCh) })
+
 	limiter := ratelimit.New()
-	proxyHandler := proxy.NewHandler(cfg.OllamaURL, usageCh, cfg.MaxRequestBody, db)
+	proxyHandler := proxy.NewHandler(ollamaURL, usageCh, cfg.MaxRequestBody, db, m)
 	authMiddleware := auth.Middleware(db)
-	creditGate := credits.CreditGate(db)
-	rateLimitMiddleware := ratelimit.Middleware(limiter)
+	creditGate := credits.CreditGate(db, m)
+	rateLimitMiddleware := ratelimit.Middleware(limiter, m)
 	cors := middleware.CORS(cfg.CORSOrigins)
 	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh)
 	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant)
 
+	hc := health.NewChecker(db, cfg.OllamaURL, func() int { return len(usageCh) }, cap(usageCh))
+	hc.SetOllamaGauge(m.OllamaUp)
+
 	mux := http.NewServeMux()
 
-	// Health check — no auth, no CORS
-	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
-	})
+	// Health checks — no auth, no CORS
+	mux.HandleFunc("GET /api/healthz/live", hc.LiveHandler)
+	mux.HandleFunc("GET /api/healthz/ready", hc.ReadyHandler)
+	mux.HandleFunc("GET /api/healthz", hc.LiveHandler) // backward compat alias
 
-	// Client API — CORS + auth + credit gate + rate limit + proxy
-	mux.Handle("/api/v1/", cors(authMiddleware(creditGate(rateLimitMiddleware(proxyHandler)))))
+	// Client API — CORS + auth + credit gate + rate limit + proxy (instrumented)
+	mux.Handle("/api/v1/", m.InstrumentHandler(cors(authMiddleware(creditGate(rateLimitMiddleware(proxyHandler))))))
+
+	// Metrics endpoint — unauthenticated, cluster-internal only
+	mux.Handle("GET /metrics", m.Handler())
 
 	// Admin — no CORS
 	mux.Handle("/api/admin/", adminHandler)
@@ -121,7 +152,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
-		Handler:     mux,
+		Handler:     requestid.Middleware(mux),
 		ReadTimeout: 30 * time.Second,
 		IdleTimeout: 120 * time.Second,
 		// WriteTimeout = 0: SSE streams can run indefinitely
@@ -132,14 +163,15 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("proxy listening on :%s", cfg.Port)
+		slog.Info("proxy listening", "port", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server: %v", err)
+			slog.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutting down...")
+	slog.Info("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -153,5 +185,5 @@ func main() {
 	close(usageCh)
 	<-writerDone
 
-	log.Println("shutdown complete")
+	slog.Info("shutdown complete")
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/metrics"
 )
 
 type bucket struct {
@@ -92,7 +93,7 @@ func (l *Limiter) prune() {
 }
 
 // Middleware returns HTTP middleware that enforces per-key rate limits.
-func Middleware(limiter *Limiter) func(http.Handler) http.Handler {
+func Middleware(limiter *Limiter, m *metrics.Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := auth.KeyFromContext(r.Context())
@@ -104,6 +105,7 @@ func Middleware(limiter *Limiter) func(http.Handler) http.Handler {
 
 			allowed, retryAfter := limiter.Allow(key.ID, key.RateLimit)
 			if !allowed {
+				m.RecordRateLimitReject()
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", math.Ceil(retryAfter)))
 				w.WriteHeader(http.StatusTooManyRequests)

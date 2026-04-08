@@ -5,12 +5,12 @@ An OpenAI-compatible reverse proxy to Ollama with API key authentication, per-ke
 ## Architecture
 
 ```
-Client → CORS → Auth → Rate Limit → Proxy → Ollama
-                                       ↓
-                              Async Usage Logger → PostgreSQL
+Client → RequestID → CORS → Auth → CreditGate → RateLimit → Proxy → Ollama
+                                                                ↓
+                                                    Async Usage Logger → PostgreSQL
 ```
 
-8 internal packages (`config`, `auth`, `store`, `ratelimit`, `proxy`, `middleware`, `admin`, `user`) — all using stdlib `net/http`, no frameworks.
+Internal packages: `config`, `auth`, `store`, `ratelimit`, `proxy`, `middleware`, `admin`, `user`, `credits`, `logging`, `requestid`, `health`, `metrics`, `apierror` — all using stdlib `net/http`, no frameworks.
 
 ## Endpoints
 
@@ -19,8 +19,16 @@ Client → CORS → Auth → Rate Limit → Proxy → Ollama
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/chat/completions` | Proxied to Ollama with usage tracking (streaming + non-streaming) |
-| `GET` | `/api/v1/models` | Passthrough to Ollama |
-| `GET` | `/api/healthz` | Liveness/readiness probe |
+| `GET` | `/api/v1/models` | Lists models with active pricing |
+
+### Health & Observability
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/healthz/live` | Liveness probe — always 200 |
+| `GET` | `/api/healthz/ready` | Readiness probe — checks DB, Ollama, usage writer |
+| `GET` | `/api/healthz` | Alias for `/api/healthz/live` (backward compat) |
+| `GET` | `/metrics` | Prometheus metrics endpoint |
 
 ### Auth API (public + session-authenticated)
 
@@ -142,6 +150,7 @@ All configuration via environment variables:
 | `PORT` | `8080` | Server listen port |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes |
+| `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 
 ## Deployment
 
@@ -173,9 +182,36 @@ docker build -f deploy/Dockerfile -t ai-proxy .
 | Area | Issue |
 |------|-------|
 | Endpoints | Only chat completions + models; no embeddings, completions, or images |
-| Observability | No structured logging, no metrics, no request IDs |
 | Rate limiting | In-memory only — resets on restart |
 | Validation | Request body forwarded as-is, no schema checks |
 | Scale | Single replica, no multi-backend support |
 | Storage | No backup strategy, soft-delete only (unbounded growth) |
 | Streaming | Token extraction is fragile — silently fails if Ollama changes SSE format |
+
+## Observability
+
+### Structured Logging
+
+All logs are JSON to stdout via `slog`, collected by Alloy and shipped to Loki. Every log entry within an HTTP request includes `request_id` automatically via a context-aware slog handler.
+
+### Request IDs
+
+Every request gets an `X-Request-ID` header (generated as `req_` + 32 hex chars, or reuses a valid incoming header). The ID appears in response headers and error response JSON bodies:
+
+```json
+{"error":{"message":"...","type":"...","code":"..."},"request_id":"req_abc123..."}
+```
+
+### Prometheus Metrics
+
+Available at `GET /metrics`. Key metrics:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `aiproxy_request_duration_seconds` | Histogram | HTTP request latency |
+| `aiproxy_requests_total` | Counter | Total HTTP requests |
+| `aiproxy_tokens_total` | Counter | Tokens processed (by model, prompt/completion) |
+| `aiproxy_credit_gate_rejects_total` | Counter | Requests rejected by credit gate |
+| `aiproxy_ratelimit_rejects_total` | Counter | Requests rejected by rate limiter |
+| `aiproxy_usage_channel_depth` | Gauge | Async usage channel depth |
+| `aiproxy_ollama_up` | Gauge | Ollama reachability (updated on readiness check) |
