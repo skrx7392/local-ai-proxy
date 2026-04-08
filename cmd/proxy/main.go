@@ -11,6 +11,7 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/admin"
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/config"
+	"github.com/krishna/local-ai-proxy/internal/credits"
 	"github.com/krishna/local-ai-proxy/internal/middleware"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
@@ -69,6 +70,16 @@ func main() {
 	// Backfill accounts for existing users (idempotent)
 	if err := db.BackfillAccounts(); err != nil {
 		log.Fatalf("backfill accounts: %v", err)
+	}
+
+	// Backfill credit balances for accounts that lack one
+	if err := db.BackfillCreditBalances(); err != nil {
+		log.Fatalf("backfill credit balances: %v", err)
+	}
+
+	// Seed default model pricing (idempotent)
+	if err := credits.SeedDefaultPricing(db); err != nil {
+		log.Fatalf("seed pricing: %v", err)
 	}
 
 	limiter := ratelimit.New()
