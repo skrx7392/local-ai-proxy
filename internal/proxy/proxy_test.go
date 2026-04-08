@@ -1103,6 +1103,75 @@ func TestCreditIntegration_SessionLimit_Returns429(t *testing.T) {
 	}
 }
 
+func TestCreditIntegration_NonStreaming_NoUsageTokens_EstimatesFromBody(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("estimate-body@example.com", "hash", "EstBody")
+	_ = db.AddCredits(accID, 1000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	// Response without usage data — tokens will be estimated from body size
+	ollamaResp := map[string]any{
+		"id": "chatcmpl-no-usage", "object": "chat.completion", "model": "llama3.1:8b",
+		"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "Hello world!"}}},
+	}
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, ollamaResp)
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	// Balance should be reduced (estimated from body)
+	bal, _ := db.GetCreditBalance(accID)
+	if bal.Balance >= 1000 {
+		t.Errorf("expected balance < 1000 after body estimation, got %f", bal.Balance)
+	}
+}
+
+func TestCreditIntegration_WithMaxTokens(t *testing.T) {
+	db := setupTestDB(t)
+	accID, _, _ := db.RegisterUser("maxtok@example.com", "hash", "MaxTok")
+	_ = db.AddCredits(accID, 1000, "grant")
+	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+
+	ollamaResp := map[string]any{
+		"id": "chatcmpl-mt", "object": "chat.completion", "model": "llama3.1:8b",
+		"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "Hi"}}},
+		"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+	}
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, ollamaResp)
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(upstream.URL, usageCh, 52428800, db)
+
+	// Request with max_tokens set — should affect reserve estimate
+	reqBody := `{"model":"llama3.1:8b","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	key := &store.APIKey{ID: 1, Name: "test", AccountID: &accID}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
 func TestCreditIntegration_StreamingSettlement(t *testing.T) {
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("stream-credit@example.com", "hash", "StreamCredit")
