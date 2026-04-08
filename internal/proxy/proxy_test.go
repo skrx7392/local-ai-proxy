@@ -145,33 +145,6 @@ func TestServeHTTP_NotFoundForPostModels(t *testing.T) {
 
 // --- Mock Ollama server helpers ---
 
-func mockOllamaModels() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			resp := map[string]any{
-				"object": "list",
-				"data": []map[string]any{
-					{
-						"id":       "llama3:latest",
-						"object":   "model",
-						"owned_by": "library",
-					},
-					{
-						"id":       "mistral:latest",
-						"object":   "model",
-						"owned_by": "library",
-					},
-				},
-			}
-			json.NewEncoder(w).Encode(resp)
-			return
-		}
-		http.NotFound(w, r)
-	}))
-}
-
 func mockOllamaChatNonStreaming(statusCode int, respBody map[string]any) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/chat/completions" {
@@ -779,27 +752,6 @@ func TestHandleChatCompletions_EmptyBody(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
-}
-
-// responseRecorder FlushNonFlusher test removed — responseRecorder type was deleted
-
-// nonFlusherWriter is an http.ResponseWriter that does not implement http.Flusher
-type nonFlusherWriter struct {
-	header     http.Header
-	statusCode int
-	body       bytes.Buffer
-}
-
-func (w *nonFlusherWriter) Header() http.Header {
-	return w.header
-}
-
-func (w *nonFlusherWriter) Write(b []byte) (int, error) {
-	return w.body.Write(b)
-}
-
-func (w *nonFlusherWriter) WriteHeader(code int) {
-	w.statusCode = code
 }
 
 // --- Test the read body error path (not "too large") ---
