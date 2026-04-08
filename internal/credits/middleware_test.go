@@ -57,6 +57,17 @@ func setupTestStore(t *testing.T) *store.Store {
 	return s
 }
 
+func TestWriteJSONError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeJSONError(rec, http.StatusPaymentRequired, "insufficient_credits", "invalid_request_error", "Not enough")
+	if rec.Code != http.StatusPaymentRequired {
+		t.Errorf("expected 402, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("expected application/json content type")
+	}
+}
+
 func TestCreditGate_NilAccountID_PassesThrough(t *testing.T) {
 	db := setupTestStore(t)
 	gate := CreditGate(db)
@@ -123,6 +134,26 @@ func TestCreditGate_ZeroBalance_Returns402(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusPaymentRequired {
 		t.Errorf("expected 402, got %d", rec.Code)
+	}
+}
+
+func TestCreditGate_NoKey_PassesThrough(t *testing.T) {
+	db := setupTestStore(t)
+	gate := CreditGate(db)
+
+	called := false
+	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// No key in context at all
+	req := httptest.NewRequest("GET", "/test", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+	if !called {
+		t.Error("expected handler to be called when no key in context")
 	}
 }
 
