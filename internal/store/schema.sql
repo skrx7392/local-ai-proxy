@@ -78,3 +78,77 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN
     NULL;
 END $$;
+
+-- Credit balances per account
+CREATE TABLE IF NOT EXISTS credit_balances (
+    account_id BIGINT PRIMARY KEY REFERENCES accounts(id),
+    balance    DECIMAL(15,6) NOT NULL DEFAULT 0,
+    reserved   DECIMAL(15,6) NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Audit trail for all credit changes
+CREATE TABLE IF NOT EXISTS credit_transactions (
+    id            BIGSERIAL PRIMARY KEY,
+    account_id    BIGINT NOT NULL REFERENCES accounts(id),
+    amount        DECIMAL(15,6) NOT NULL,
+    balance_after DECIMAL(15,6) NOT NULL,
+    type          TEXT NOT NULL,
+    reference_id  BIGINT,
+    description   TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_transactions_account
+    ON credit_transactions(account_id, created_at);
+
+-- Per-model pricing
+CREATE TABLE IF NOT EXISTS credit_pricing (
+    id                 BIGSERIAL PRIMARY KEY,
+    model_id           TEXT NOT NULL UNIQUE,
+    prompt_rate        DECIMAL(15,10) NOT NULL,
+    completion_rate    DECIMAL(15,10) NOT NULL,
+    typical_completion INTEGER NOT NULL DEFAULT 500,
+    effective_from     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    active             BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- Credit holds for reserve/settle flow
+CREATE TABLE IF NOT EXISTS credit_holds (
+    id          BIGSERIAL PRIMARY KEY,
+    account_id  BIGINT NOT NULL REFERENCES accounts(id),
+    amount      DECIMAL(15,6) NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    settled_at  TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_holds_pending
+    ON credit_holds(status, created_at) WHERE status = 'pending';
+
+-- Historical usage averages for reserve estimation
+CREATE TABLE IF NOT EXISTS account_usage_stats (
+    account_id            BIGINT NOT NULL,
+    model                 TEXT NOT NULL,
+    avg_completion_tokens INTEGER NOT NULL DEFAULT 0,
+    request_count         INTEGER NOT NULL DEFAULT 0,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (account_id, model)
+);
+
+-- Registration tokens for service self-provisioning
+CREATE TABLE IF NOT EXISTS registration_tokens (
+    id           BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    credit_grant DECIMAL(15,6) NOT NULL DEFAULT 0,
+    max_uses     INTEGER NOT NULL DEFAULT 1,
+    uses         INTEGER NOT NULL DEFAULT 0,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at   TIMESTAMPTZ,
+    revoked      BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- Composite index for session limit sliding window queries
+CREATE INDEX IF NOT EXISTS idx_usage_logs_key_created
+    ON usage_logs(api_key_id, created_at);

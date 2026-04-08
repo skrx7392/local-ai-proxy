@@ -71,6 +71,63 @@ type User struct {
 	AccountID    *int64
 }
 
+type CreditBalance struct {
+	AccountID int64
+	Balance   float64
+	Reserved  float64
+	UpdatedAt time.Time
+}
+
+type CreditTransaction struct {
+	ID           int64
+	AccountID    int64
+	Amount       float64
+	BalanceAfter float64
+	Type         string // "grant", "usage", "refund", "adjustment"
+	ReferenceID  *int64
+	Description  *string
+	CreatedAt    time.Time
+}
+
+type CreditHold struct {
+	ID        int64
+	AccountID int64
+	Amount    float64
+	Status    string // "pending", "settled", "released"
+	CreatedAt time.Time
+	SettledAt *time.Time
+}
+
+type CreditPricing struct {
+	ID                int64
+	ModelID           string
+	PromptRate        float64
+	CompletionRate    float64
+	TypicalCompletion int
+	EffectiveFrom     time.Time
+	Active            bool
+}
+
+type AccountUsageStats struct {
+	AccountID           int64
+	Model               string
+	AvgCompletionTokens int
+	RequestCount        int
+	UpdatedAt           time.Time
+}
+
+type RegistrationToken struct {
+	ID          int64
+	Name        string
+	TokenHash   string
+	CreditGrant float64
+	MaxUses     int
+	Uses        int
+	CreatedAt   time.Time
+	ExpiresAt   *time.Time
+	Revoked     bool
+}
+
 type Session struct {
 	ID        int64
 	UserID    int64
@@ -493,6 +550,13 @@ func (s *Store) RegisterUser(email, passwordHash, name string) (int64, int64, er
 	).Scan(&userID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("create user: %w", err)
+	}
+
+	// Initialize credit balance for the new account
+	_, err = tx.Exec(ctx,
+		`INSERT INTO credit_balances (account_id) VALUES ($1) ON CONFLICT DO NOTHING`, accountID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("init credit balance: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
