@@ -48,3 +48,33 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN
     NULL;
 END $$;
+
+-- Accounts: universal tenant for credits
+CREATE TABLE IF NOT EXISTS accounts (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL DEFAULT 'personal',
+    is_active  BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Link users to accounts
+DO $$ BEGIN
+    ALTER TABLE users ADD COLUMN account_id BIGINT REFERENCES accounts(id);
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+-- Link API keys to accounts (billing ownership)
+DO $$ BEGIN
+    ALTER TABLE api_keys ADD COLUMN account_id BIGINT REFERENCES accounts(id);
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+-- Per-key session token limit (6hr sliding window)
+DO $$ BEGIN
+    ALTER TABLE api_keys ADD COLUMN session_token_limit INTEGER;
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;

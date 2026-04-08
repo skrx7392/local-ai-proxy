@@ -66,6 +66,11 @@ func main() {
 		}
 	}()
 
+	// Backfill accounts for existing users (idempotent)
+	if err := db.BackfillAccounts(); err != nil {
+		log.Fatalf("backfill accounts: %v", err)
+	}
+
 	limiter := ratelimit.New()
 	proxyHandler := proxy.NewHandler(cfg.OllamaURL, usageCh, cfg.MaxRequestBody)
 	authMiddleware := auth.Middleware(db)

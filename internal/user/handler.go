@@ -121,7 +121,7 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := h.store.CreateUser(req.Email, string(hash), req.Name)
+	accountID, userID, err := h.store.RegisterUser(req.Email, string(hash), req.Name)
 	if err != nil {
 		// Check for duplicate email (unique constraint violation)
 		proxy.WriteError(w, http.StatusConflict, "email_exists", "invalid_request_error", "Email already registered")
@@ -130,7 +130,7 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{"id": id, "email": req.Email, "name": req.Name})
+	json.NewEncoder(w).Encode(map[string]any{"id": userID, "account_id": accountID, "email": req.Email, "name": req.Name})
 }
 
 func (h *handler) login(w http.ResponseWriter, r *http.Request) {
@@ -329,9 +329,17 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 	keyPrefix := rawKey[:11]
 	keyHash := auth.HashKey(rawKey)
 
-	id, err := h.store.CreateKeyForUser(user.ID, req.Name, keyHash, keyPrefix, req.RateLimit)
-	if err != nil {
-		log.Printf("create key error: %v", err)
+	var (
+		id     int64
+		keyErr error
+	)
+	if user.AccountID != nil {
+		id, keyErr = h.store.CreateKeyForAccount(user.ID, *user.AccountID, req.Name, keyHash, keyPrefix, req.RateLimit)
+	} else {
+		id, keyErr = h.store.CreateKeyForUser(user.ID, req.Name, keyHash, keyPrefix, req.RateLimit)
+	}
+	if keyErr != nil {
+		log.Printf("create key error: %v", keyErr)
 		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create key")
 		return
 	}

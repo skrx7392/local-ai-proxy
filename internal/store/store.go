@@ -18,14 +18,24 @@ type Store struct {
 }
 
 type APIKey struct {
+	ID                int64
+	Name              string
+	KeyHash           string
+	KeyPrefix         string
+	RateLimit         int
+	CreatedAt         time.Time
+	Revoked           bool
+	UserID            *int64 // nil = legacy admin-created key
+	AccountID         *int64 // nil = legacy key not on credit system
+	SessionTokenLimit *int   // nil = no session limit
+}
+
+type Account struct {
 	ID        int64
 	Name      string
-	KeyHash   string
-	KeyPrefix string
-	RateLimit int
+	Type      string // "personal" or "service"
+	IsActive  bool
 	CreatedAt time.Time
-	Revoked   bool
-	UserID    *int64 // nil = legacy admin-created key
 }
 
 type UsageEntry struct {
@@ -58,6 +68,7 @@ type User struct {
 	IsActive     bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	AccountID    *int64
 }
 
 type Session struct {
@@ -124,9 +135,10 @@ func (s *Store) GetKeyByHash(hash string) (*APIKey, error) {
 	var apiKey APIKey
 	err := s.pool.QueryRow(
 		context.Background(),
-		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit
 		 FROM api_keys WHERE key_hash = $1 AND revoked = FALSE`, hash,
-	).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &apiKey.Revoked)
+	).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &apiKey.Revoked,
+		&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -140,7 +152,7 @@ func (s *Store) GetKeyByHash(hash string) (*APIKey, error) {
 func (s *Store) ListKeys() ([]APIKey, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
-		`SELECT id, name, key_prefix, rate_limit, created_at, revoked FROM api_keys ORDER BY id`,
+		`SELECT id, name, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit FROM api_keys ORDER BY id`,
 	)
 	if err != nil {
 		return nil, err
@@ -150,7 +162,8 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 	var keys []APIKey
 	for rows.Next() {
 		var apiKey APIKey
-		if err := rows.Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &apiKey.Revoked); err != nil {
+		if err := rows.Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &apiKey.Revoked,
+			&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit); err != nil {
 			return nil, err
 		}
 		keys = append(keys, apiKey)
@@ -201,9 +214,9 @@ func (s *Store) GetUserByEmail(email string) (*User, error) {
 	var u User
 	err := s.pool.QueryRow(
 		context.Background(),
-		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at
+		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at, account_id
 		 FROM users WHERE email = $1`, email,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt, &u.AccountID)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -218,9 +231,9 @@ func (s *Store) GetUserByID(id int64) (*User, error) {
 	var u User
 	err := s.pool.QueryRow(
 		context.Background(),
-		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at
+		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at, account_id
 		 FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt, &u.AccountID)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -266,7 +279,7 @@ func (s *Store) UpdateUserPassword(id int64, passwordHash string) error {
 func (s *Store) ListUsers() ([]User, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
-		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at FROM users ORDER BY id`,
+		`SELECT id, email, password_hash, name, role, is_active, created_at, updated_at, account_id FROM users ORDER BY id`,
 	)
 	if err != nil {
 		return nil, err
@@ -276,7 +289,7 @@ func (s *Store) ListUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Name, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt, &u.AccountID); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -363,7 +376,7 @@ func (s *Store) CreateKeyForUser(userID int64, name, keyHash, keyPrefix string, 
 func (s *Store) ListKeysByUser(userID int64) ([]APIKey, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
-		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit
 		 FROM api_keys WHERE user_id = $1 ORDER BY id`, userID,
 	)
 	if err != nil {
@@ -374,12 +387,184 @@ func (s *Store) ListKeysByUser(userID int64) ([]APIKey, error) {
 	var keys []APIKey
 	for rows.Next() {
 		var k APIKey
-		if err := rows.Scan(&k.ID, &k.Name, &k.KeyHash, &k.KeyPrefix, &k.RateLimit, &k.CreatedAt, &k.Revoked, &k.UserID); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyHash, &k.KeyPrefix, &k.RateLimit, &k.CreatedAt, &k.Revoked,
+			&k.UserID, &k.AccountID, &k.SessionTokenLimit); err != nil {
 			return nil, err
 		}
 		keys = append(keys, k)
 	}
 	return keys, rows.Err()
+}
+
+// CreateAccount inserts a new account and returns its ID.
+func (s *Store) CreateAccount(name, accountType string) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(
+		context.Background(),
+		`INSERT INTO accounts (name, type) VALUES ($1, $2) RETURNING id`,
+		name, accountType,
+	).Scan(&id)
+	return id, err
+}
+
+// GetAccountByID looks up an account by ID.
+func (s *Store) GetAccountByID(id int64) (*Account, error) {
+	var a Account
+	err := s.pool.QueryRow(
+		context.Background(),
+		`SELECT id, name, type, is_active, created_at FROM accounts WHERE id = $1`, id,
+	).Scan(&a.ID, &a.Name, &a.Type, &a.IsActive, &a.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// ListAccounts returns all accounts.
+func (s *Store) ListAccounts() ([]Account, error) {
+	rows, err := s.pool.Query(
+		context.Background(),
+		`SELECT id, name, type, is_active, created_at FROM accounts ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []Account
+	for rows.Next() {
+		var a Account
+		if err := rows.Scan(&a.ID, &a.Name, &a.Type, &a.IsActive, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, a)
+	}
+	return accounts, rows.Err()
+}
+
+// SetAccountActive activates or deactivates an account.
+func (s *Store) SetAccountActive(id int64, active bool) error {
+	ct, err := s.pool.Exec(context.Background(), `UPDATE accounts SET is_active = $1 WHERE id = $2`, active, id)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("account not found")
+	}
+	return nil
+}
+
+// CreateKeyForAccount creates an API key for an account with both user_id and account_id.
+func (s *Store) CreateKeyForAccount(userID, accountID int64, name, keyHash, keyPrefix string, rateLimit int) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(
+		context.Background(),
+		`INSERT INTO api_keys (name, key_hash, key_prefix, rate_limit, user_id, account_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		name, keyHash, keyPrefix, rateLimit, userID, accountID,
+	).Scan(&id)
+	return id, err
+}
+
+// RegisterUser atomically creates a personal account and user in one transaction.
+// Returns (accountID, userID, err).
+func (s *Store) RegisterUser(email, passwordHash, name string) (int64, int64, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var accountID int64
+	err = tx.QueryRow(ctx,
+		`INSERT INTO accounts (name, type) VALUES ($1, 'personal') RETURNING id`, name,
+	).Scan(&accountID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("create account: %w", err)
+	}
+
+	var userID int64
+	err = tx.QueryRow(ctx,
+		`INSERT INTO users (email, password_hash, name, account_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+		email, passwordHash, name, accountID,
+	).Scan(&userID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("create user: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("commit: %w", err)
+	}
+	return accountID, userID, nil
+}
+
+// BackfillAccounts creates personal accounts for existing users without one,
+// and updates their keys' account_id. Idempotent — safe to call on every startup.
+func (s *Store) BackfillAccounts() error {
+	ctx := context.Background()
+
+	// Find users without an account_id
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name FROM users WHERE account_id IS NULL`)
+	if err != nil {
+		return fmt.Errorf("query users without account: %w", err)
+	}
+	defer rows.Close()
+
+	type userInfo struct {
+		id   int64
+		name string
+	}
+	var users []userInfo
+	for rows.Next() {
+		var u userInfo
+		if err := rows.Scan(&u.id, &u.name); err != nil {
+			return fmt.Errorf("scan user: %w", err)
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate users: %w", err)
+	}
+
+	for _, u := range users {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin tx for user %d: %w", u.id, err)
+		}
+
+		var accountID int64
+		err = tx.QueryRow(ctx,
+			`INSERT INTO accounts (name, type) VALUES ($1, 'personal') RETURNING id`, u.name,
+		).Scan(&accountID)
+		if err != nil {
+			tx.Rollback(ctx)
+			return fmt.Errorf("create account for user %d: %w", u.id, err)
+		}
+
+		_, err = tx.Exec(ctx,
+			`UPDATE users SET account_id = $1 WHERE id = $2`, accountID, u.id)
+		if err != nil {
+			tx.Rollback(ctx)
+			return fmt.Errorf("set user %d account_id: %w", u.id, err)
+		}
+
+		_, err = tx.Exec(ctx,
+			`UPDATE api_keys SET account_id = $1 WHERE user_id = $2 AND account_id IS NULL`,
+			accountID, u.id)
+		if err != nil {
+			tx.Rollback(ctx)
+			return fmt.Errorf("set keys account_id for user %d: %w", u.id, err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit backfill for user %d: %w", u.id, err)
+		}
+	}
+	return nil
 }
 
 // GetUsageStats returns aggregated usage statistics.
