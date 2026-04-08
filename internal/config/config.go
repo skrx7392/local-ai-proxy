@@ -7,12 +7,13 @@ import (
 )
 
 type Config struct {
-	OllamaURL      string
-	AdminKey       string
-	DatabaseURL    string
-	Port           string
-	CORSOrigins    string
-	MaxRequestBody int64
+	OllamaURL          string
+	AdminKey           string
+	DatabaseURL        string
+	Port               string
+	CORSOrigins        string
+	MaxRequestBody     int64
+	DefaultCreditGrant float64
 }
 
 func Load() (Config, error) {
@@ -35,13 +36,23 @@ func Load() (Config, error) {
 		maxBody = n
 	}
 
+	var defaultCreditGrant float64
+	if v := os.Getenv("DEFAULT_CREDIT_GRANT"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid DEFAULT_CREDIT_GRANT: %w", err)
+		}
+		defaultCreditGrant = n
+	}
+
 	return Config{
-		OllamaURL:      envOrDefault("OLLAMA_URL", "http://localhost:11434"),
-		AdminKey:       adminKey,
-		DatabaseURL:    databaseURL,
-		Port:           envOrDefault("PORT", "8080"),
-		CORSOrigins:    envOrDefault("CORS_ORIGINS", "*"),
-		MaxRequestBody: maxBody,
+		OllamaURL:          envOrDefault("OLLAMA_URL", "http://localhost:11434"),
+		AdminKey:           adminKey,
+		DatabaseURL:        databaseURL,
+		Port:               envOrDefault("PORT", "8080"),
+		CORSOrigins:        envOrDefault("CORS_ORIGINS", "*"),
+		MaxRequestBody:     maxBody,
+		DefaultCreditGrant: defaultCreditGrant,
 	}, nil
 }
 

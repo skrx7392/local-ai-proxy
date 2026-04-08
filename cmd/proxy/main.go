@@ -96,7 +96,7 @@ func main() {
 	rateLimitMiddleware := ratelimit.Middleware(limiter)
 	cors := middleware.CORS(cfg.CORSOrigins)
 	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh)
-	userHandler := user.NewHandler(db)
+	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant)
 
 	mux := http.NewServeMux()
 
