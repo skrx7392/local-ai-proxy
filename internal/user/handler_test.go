@@ -41,7 +41,7 @@ func setupUserTest(t *testing.T) (http.Handler, *store.Store) {
 	_, _ = s.Pool().Exec(ctx, "DELETE FROM api_keys")
 	_, _ = s.Pool().Exec(ctx, "DELETE FROM users")
 
-	h := NewHandler(s)
+	h := NewHandler(s, 0)
 	return h, s
 }
 

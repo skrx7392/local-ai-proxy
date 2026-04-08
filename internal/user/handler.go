@@ -16,7 +16,8 @@ import (
 )
 
 type handler struct {
-	store *store.Store
+	store              *store.Store
+	defaultCreditGrant float64
 }
 
 type registerRequest struct {
@@ -76,8 +77,8 @@ type keyResponse struct {
 	Revoked   bool   `json:"revoked"`
 }
 
-func NewHandler(dataStore *store.Store) http.Handler {
-	h := &handler{store: dataStore}
+func NewHandler(dataStore *store.Store, defaultCreditGrant float64) http.Handler {
+	h := &handler{store: dataStore, defaultCreditGrant: defaultCreditGrant}
 
 	mux := http.NewServeMux()
 
@@ -98,6 +99,8 @@ func NewHandler(dataStore *store.Store) http.Handler {
 	mux.Handle("GET /api/users/keys", sessionAuth(http.HandlerFunc(h.listKeys)))
 	mux.Handle("DELETE /api/users/keys/{id}", sessionAuth(http.HandlerFunc(h.revokeKey)))
 	mux.Handle("GET /api/users/usage", sessionAuth(http.HandlerFunc(h.getUsage)))
+	mux.Handle("GET /api/users/credits", sessionAuth(http.HandlerFunc(h.getCredits)))
+	mux.Handle("GET /api/users/credits/transactions", sessionAuth(http.HandlerFunc(h.getCreditTransactions)))
 
 	return mux
 }
@@ -129,6 +132,14 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		// Check for duplicate email (unique constraint violation)
 		proxy.WriteError(w, http.StatusConflict, "email_exists", "invalid_request_error", "Email already registered")
 		return
+	}
+
+	// Grant default credits if configured
+	if h.defaultCreditGrant > 0 {
+		if err := h.store.AddCredits(accountID, h.defaultCreditGrant, "registration bonus"); err != nil {
+			log.Printf("grant default credits error: %v", err)
+			// Don't fail registration for this — account is already created
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -461,6 +472,92 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(allStats)
+}
+
+func (h *handler) getCredits(w http.ResponseWriter, r *http.Request) {
+	user := UserFromContext(r.Context())
+	if user == nil {
+		proxy.WriteError(w, http.StatusUnauthorized, "no_user", "invalid_request_error", "Not authenticated")
+		return
+	}
+	if user.AccountID == nil {
+		proxy.WriteError(w, http.StatusNotFound, "no_account", "invalid_request_error", "No account associated with this user")
+		return
+	}
+
+	bal, err := h.store.GetCreditBalance(*user.AccountID)
+	if err != nil {
+		log.Printf("get credit balance error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get credit balance")
+		return
+	}
+	if bal == nil {
+		proxy.WriteError(w, http.StatusNotFound, "no_balance", "invalid_request_error", "No credit balance found")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"balance":   bal.Balance,
+		"reserved":  bal.Reserved,
+		"available": bal.Balance - bal.Reserved,
+	})
+}
+
+func (h *handler) getCreditTransactions(w http.ResponseWriter, r *http.Request) {
+	user := UserFromContext(r.Context())
+	if user == nil {
+		proxy.WriteError(w, http.StatusUnauthorized, "no_user", "invalid_request_error", "Not authenticated")
+		return
+	}
+	if user.AccountID == nil {
+		proxy.WriteError(w, http.StatusNotFound, "no_account", "invalid_request_error", "No account associated with this user")
+		return
+	}
+
+	limit := 20
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if l, err := strconv.Atoi(v); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if o, err := strconv.Atoi(v); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	txns, err := h.store.GetCreditTransactions(*user.AccountID, limit, offset)
+	if err != nil {
+		log.Printf("get credit transactions error: %v", err)
+		proxy.WriteError(w, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get transactions")
+		return
+	}
+
+	type txnResponse struct {
+		ID           int64   `json:"id"`
+		Amount       float64 `json:"amount"`
+		BalanceAfter float64 `json:"balance_after"`
+		Type         string  `json:"type"`
+		Description  *string `json:"description"`
+		CreatedAt    string  `json:"created_at"`
+	}
+
+	resp := make([]txnResponse, len(txns))
+	for i, t := range txns {
+		resp[i] = txnResponse{
+			ID:           t.ID,
+			Amount:       t.Amount,
+			BalanceAfter: t.BalanceAfter,
+			Type:         t.Type,
+			Description:  t.Description,
+			CreatedAt:    t.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (h *handler) registerServiceAccount(w http.ResponseWriter, r *http.Request) {
