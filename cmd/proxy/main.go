@@ -18,9 +18,9 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/logging"
 	appmetrics "github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/middleware"
-	"github.com/krishna/local-ai-proxy/internal/requestid"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
+	"github.com/krishna/local-ai-proxy/internal/requestid"
 	"github.com/krishna/local-ai-proxy/internal/store"
 	"github.com/krishna/local-ai-proxy/internal/user"
 )

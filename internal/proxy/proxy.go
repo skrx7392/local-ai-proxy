@@ -24,8 +24,8 @@ type handler struct {
 	client    *http.Client
 	usageCh   chan<- store.UsageEntry
 	maxBody   int64
-	db        *store.Store      // nil = credits disabled
-	metrics   *metrics.Metrics  // nil = metrics disabled
+	db        *store.Store     // nil = credits disabled
+	metrics   *metrics.Metrics // nil = metrics disabled
 }
 
 // requestMeta holds fields peeked from the request body.
