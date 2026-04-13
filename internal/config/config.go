@@ -7,14 +7,15 @@ import (
 )
 
 type Config struct {
-	OllamaURL          string
-	AdminKey           string
-	DatabaseURL        string
-	Port               string
-	CORSOrigins        string
-	MaxRequestBody     int64
-	DefaultCreditGrant float64
-	LogLevel           string
+	OllamaURL           string
+	AdminKey            string
+	AdminBootstrapToken string
+	DatabaseURL         string
+	Port                string
+	CORSOrigins         string
+	MaxRequestBody      int64
+	DefaultCreditGrant  float64
+	LogLevel            string
 }
 
 func Load() (Config, error) {
@@ -47,14 +48,15 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		OllamaURL:          envOrDefault("OLLAMA_URL", "http://localhost:11434"),
-		AdminKey:           adminKey,
-		DatabaseURL:        databaseURL,
-		Port:               envOrDefault("PORT", "8080"),
-		CORSOrigins:        envOrDefault("CORS_ORIGINS", "*"),
-		MaxRequestBody:     maxBody,
-		DefaultCreditGrant: defaultCreditGrant,
-		LogLevel:           envOrDefault("LOG_LEVEL", "info"),
+		OllamaURL:           envOrDefault("OLLAMA_URL", "http://localhost:11434"),
+		AdminKey:            adminKey,
+		AdminBootstrapToken: os.Getenv("ADMIN_BOOTSTRAP_TOKEN"),
+		DatabaseURL:         databaseURL,
+		Port:                envOrDefault("PORT", "8080"),
+		CORSOrigins:         envOrDefault("CORS_ORIGINS", "*"),
+		MaxRequestBody:      maxBody,
+		DefaultCreditGrant:  defaultCreditGrant,
+		LogLevel:            envOrDefault("LOG_LEVEL", "info"),
 	}, nil
 }
 

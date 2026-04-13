@@ -84,9 +84,9 @@ func TestAdmin_Deactivate_ConcurrentRaceSerializes(t *testing.T) {
 	adminB := seedAdmin(t, s, "race-b@example.com")
 
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		codes   []int
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		codes []int
 	)
 	for _, id := range []int64{adminA, adminB} {
 		wg.Add(1)

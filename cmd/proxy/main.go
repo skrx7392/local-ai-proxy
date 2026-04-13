@@ -12,6 +12,7 @@ import (
 
 	"github.com/krishna/local-ai-proxy/internal/admin"
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/bootstrap"
 	"github.com/krishna/local-ai-proxy/internal/config"
 	"github.com/krishna/local-ai-proxy/internal/credits"
 	"github.com/krishna/local-ai-proxy/internal/health"
@@ -122,6 +123,7 @@ func main() {
 	rateLimitMiddleware := ratelimit.Middleware(limiter, m)
 	cors := middleware.CORS(cfg.CORSOrigins)
 	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh)
+	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken)
 	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant)
 
 	hc := health.NewChecker(db, cfg.OllamaURL, func() int { return len(usageCh) }, cap(usageCh))
@@ -139,6 +141,11 @@ func main() {
 
 	// Metrics endpoint — unauthenticated, cluster-internal only
 	mux.Handle("GET /metrics", m.Handler())
+
+	// Admin bootstrap — mounted before the admin prefix so Go's ServeMux
+	// routes POST /api/admin/bootstrap outside the admin authMiddleware.
+	// Returns 404 unless ADMIN_BOOTSTRAP_TOKEN is set.
+	mux.Handle("POST /api/admin/bootstrap", bootstrapHandler)
 
 	// Admin — no CORS
 	mux.Handle("/api/admin/", adminHandler)

@@ -26,22 +26,29 @@ func setupUserTest(t *testing.T) (http.Handler, *store.Store) {
 		t.Fatalf("store.New: %v", err)
 	}
 
+	wipe := func() {
+		c := context.Background()
+		_, _ = s.Pool().Exec(c, "DELETE FROM registration_events")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_holds")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_transactions")
+		_, _ = s.Pool().Exec(c, "DELETE FROM account_usage_stats")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_balances")
+		_, _ = s.Pool().Exec(c, "DELETE FROM registration_tokens")
+		_, _ = s.Pool().Exec(c, "DELETE FROM usage_logs")
+		_, _ = s.Pool().Exec(c, "DELETE FROM user_sessions")
+		_, _ = s.Pool().Exec(c, "DELETE FROM api_keys")
+		_, _ = s.Pool().Exec(c, "DELETE FROM users")
+		_, _ = s.Pool().Exec(c, "DELETE FROM accounts")
+	}
+
 	t.Cleanup(func() {
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS registration_events")
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS usage_logs")
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS user_sessions")
-		_, _ = s.Pool().Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS user_id")
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS api_keys")
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS users")
+		wipe()
 		s.Close()
 	})
 
-	// Clean state
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM registration_events")
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM usage_logs")
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM user_sessions")
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM api_keys")
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM users")
+	// Clean state before each test, not just after — ensures no leakage
+	// from prior runs or a crashed cleanup.
+	wipe()
 
 	h := NewHandler(s, 0)
 	return h, s
