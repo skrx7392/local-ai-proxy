@@ -557,6 +557,124 @@ func TestSessionLimiter_RefillOverTime(t *testing.T) {
 	}
 }
 
+// --- Store-error fallbacks: close the store's pool mid-test so every
+// subsequent store call errors, exercising the "slog.Error + 500" branches
+// that happy-path tests never reach. Each helper gets a fresh handler so
+// the 10 req/min X-Admin-Key bucket isn't exhausted. ---
+
+func withBrokenStore(t *testing.T, fn func(h http.Handler, s *store.Store, userID, accountID, keyID int64)) {
+	t.Helper()
+	h, s := setupAdminTest(t)
+	userID, err := s.CreateUser("pc@example.com", "hash", "PC")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	accountID, err := s.CreateAccount("pc-acc", "personal")
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	keyID, err := s.CreateKey("pc-key", "pc-hash", "sk-pc", 60)
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	s.Pool().Close()
+	fn(h, s, userID, accountID, keyID)
+}
+
+func expect5xx(t *testing.T, h http.Handler, method, path, body string) {
+	t.Helper()
+	var buf *bytes.Buffer
+	if body != "" {
+		buf = bytes.NewBufferString(body)
+	} else {
+		buf = bytes.NewBufferString("")
+	}
+	req := httptest.NewRequest(method, path, buf)
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code < 500 {
+		t.Errorf("expected 5xx with closed store, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdmin_Internal_CreateKey(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodPost, "/api/admin/keys", `{"name":"x","rate_limit":60}`)
+	})
+}
+func TestAdmin_Internal_ListKeys(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodGet, "/api/admin/keys", "")
+	})
+}
+func TestAdmin_Internal_RevokeKey(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, keyID int64) {
+		expect5xx(t, h, http.MethodDelete, "/api/admin/keys/"+strconv.FormatInt(keyID, 10), "")
+	})
+}
+func TestAdmin_Internal_GetUsage(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodGet, "/api/admin/usage", "")
+	})
+}
+func TestAdmin_Internal_ListUsers(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodGet, "/api/admin/users", "")
+	})
+}
+func TestAdmin_Internal_Deactivate(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, userID, _, _ int64) {
+		expect5xx(t, h, http.MethodPut, "/api/admin/users/"+strconv.FormatInt(userID, 10)+"/deactivate", "")
+	})
+}
+func TestAdmin_Internal_Activate(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, userID, _, _ int64) {
+		expect5xx(t, h, http.MethodPut, "/api/admin/users/"+strconv.FormatInt(userID, 10)+"/activate", "")
+	})
+}
+func TestAdmin_Internal_ListAccounts(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodGet, "/api/admin/accounts", "")
+	})
+}
+func TestAdmin_Internal_GrantCredits(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, accountID, _ int64) {
+		expect5xx(t, h, http.MethodPost, "/api/admin/accounts/"+strconv.FormatInt(accountID, 10)+"/credits", `{"amount":1}`)
+	})
+}
+func TestAdmin_Internal_CreateAccountKey(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, accountID, _ int64) {
+		expect5xx(t, h, http.MethodPost, "/api/admin/accounts/"+strconv.FormatInt(accountID, 10)+"/keys", `{"name":"x"}`)
+	})
+}
+func TestAdmin_Internal_CreateRegistrationToken(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodPost, "/api/admin/registration-tokens", `{"name":"t"}`)
+	})
+}
+func TestAdmin_Internal_ListRegistrationTokens(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodGet, "/api/admin/registration-tokens", "")
+	})
+}
+func TestAdmin_Internal_ListPricing(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodGet, "/api/admin/pricing", "")
+	})
+}
+func TestAdmin_Internal_UpsertPricing(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
+		expect5xx(t, h, http.MethodPost, "/api/admin/pricing", `{"model_id":"m","prompt_rate":0.001,"completion_rate":0.001}`)
+	})
+}
+func TestAdmin_Internal_SetSessionLimit(t *testing.T) {
+	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, keyID int64) {
+		expect5xx(t, h, http.MethodPut, "/api/admin/keys/"+strconv.FormatInt(keyID, 10)+"/session-limit", `{"limit":100}`)
+	})
+}
+
 func TestSessionLimiter_HitsCap(t *testing.T) {
 	lim := &sessionLimiter{buckets: make(map[string]*sessionBucket)}
 	key := "cap-test"
