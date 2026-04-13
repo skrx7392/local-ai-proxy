@@ -69,7 +69,8 @@ type UsageEntry struct {
 	CompletionTokens int
 	TotalTokens      int
 	DurationMs       int64
-	Status           string // completed | partial | error
+	Status           string  // completed | partial | error
+	CreditsCharged   float64 // 0 when no hold/pricing was active
 }
 
 type UsageStat struct {
@@ -328,10 +329,10 @@ func (s *Store) RevokeKey(id int64) error {
 func (s *Store) LogUsage(entry UsageEntry) error {
 	_, err := s.pool.Exec(
 		context.Background(),
-		`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		entry.APIKeyID, entry.Model, entry.PromptTokens, entry.CompletionTokens,
-		entry.TotalTokens, entry.DurationMs, entry.Status,
+		entry.TotalTokens, entry.DurationMs, entry.Status, entry.CreditsCharged,
 	)
 	return err
 }
@@ -676,7 +677,9 @@ func (s *Store) CreateKeyForAccountOnly(accountID int64, name, keyHash, keyPrefi
 }
 
 // RegisterUser atomically creates a personal account and user in one transaction.
-// Returns (accountID, userID, err).
+// Returns (accountID, userID, err). Also records a registration_events audit
+// row with source='public_signup' so the admin registrations view reflects
+// self-serve signups without an additional code path.
 func (s *Store) RegisterUser(email, passwordHash, name string) (int64, int64, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
@@ -707,6 +710,14 @@ func (s *Store) RegisterUser(email, passwordHash, name string) (int64, int64, er
 		`INSERT INTO credit_balances (account_id) VALUES ($1) ON CONFLICT DO NOTHING`, accountID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("init credit balance: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO registration_events (kind, account_id, user_id, source)
+		 VALUES ('user', $1, $2, 'public_signup')`,
+		accountID, userID,
+	); err != nil {
+		return 0, 0, fmt.Errorf("record registration_event: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

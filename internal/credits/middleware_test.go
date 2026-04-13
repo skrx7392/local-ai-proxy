@@ -22,9 +22,9 @@ func setupTestStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() {
-		pool := s.Pool()
+	wipe := func() {
 		c := context.Background()
+		pool := s.Pool()
 		// DELETE rather than DROP so concurrent tests don't race on Postgres
 		// catalog locks during migrate.
 		_, _ = pool.Exec(c, "DELETE FROM registration_events")
@@ -39,22 +39,12 @@ func setupTestStore(t *testing.T) *store.Store {
 		_, _ = pool.Exec(c, "DELETE FROM api_keys")
 		_, _ = pool.Exec(c, "DELETE FROM users")
 		_, _ = pool.Exec(c, "DELETE FROM accounts")
+	}
+	wipe()
+	t.Cleanup(func() {
+		wipe()
 		s.Close()
 	})
-
-	pool := s.Pool()
-	_, _ = pool.Exec(ctx, "DELETE FROM registration_events")
-	_, _ = pool.Exec(ctx, "DELETE FROM credit_holds")
-	_, _ = pool.Exec(ctx, "DELETE FROM credit_transactions")
-	_, _ = pool.Exec(ctx, "DELETE FROM account_usage_stats")
-	_, _ = pool.Exec(ctx, "DELETE FROM credit_balances")
-	_, _ = pool.Exec(ctx, "DELETE FROM credit_pricing")
-	_, _ = pool.Exec(ctx, "DELETE FROM registration_tokens")
-	_, _ = pool.Exec(ctx, "DELETE FROM usage_logs")
-	_, _ = pool.Exec(ctx, "DELETE FROM user_sessions")
-	_, _ = pool.Exec(ctx, "DELETE FROM api_keys")
-	_, _ = pool.Exec(ctx, "DELETE FROM users")
-	_, _ = pool.Exec(ctx, "DELETE FROM accounts")
 	return s
 }
 

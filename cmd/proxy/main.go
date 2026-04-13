@@ -26,6 +26,15 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/user"
 )
 
+// Populated at build time via -ldflags "-X main.version=... -X main.buildTime=...".
+// See deploy/Dockerfile. Must be string-typed package-level vars for -X to
+// take effect; otherwise the flag is silently ignored and these stay at
+// their defaults.
+var (
+	version   = "dev"
+	buildTime = "unknown"
+)
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -101,6 +110,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Backfill registration_events for pre-existing users and service accounts
+	if err := db.BackfillRegistrationEvents(); err != nil {
+		slog.Error("backfill registration events error", "error", err)
+		os.Exit(1)
+	}
+
 	// Seed default model pricing (idempotent)
 	if err := credits.SeedDefaultPricing(db); err != nil {
 		slog.Error("seed pricing error", "error", err)
@@ -170,7 +185,7 @@ func main() {
 	defer stop()
 
 	go func() {
-		slog.Info("proxy listening", "port", cfg.Port)
+		slog.Info("proxy listening", "port", cfg.Port, "version", version, "build_time", buildTime)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
