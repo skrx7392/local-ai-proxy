@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
+	"github.com/krishna/local-ai-proxy/internal/ratelimit"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
@@ -31,9 +33,16 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
+type loginUser struct {
+	ID    int64  `json:"id"`
+	Email string `json:"email"`
+	Role  string `json:"role"`
+}
+
 type loginResponse struct {
-	Token     string `json:"token"`
-	ExpiresIn int    `json:"expires_in"` // seconds
+	Token     string     `json:"token"`
+	ExpiresIn int        `json:"expires_in"` // seconds
+	User      *loginUser `json:"user,omitempty"`
 }
 
 type profileResponse struct {
@@ -188,7 +197,8 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 	rawToken := hex.EncodeToString(tokenBytes)
 	tokenHash := auth.HashKey(rawToken)
 
-	expiresAt := sessionExpiry()
+	duration := SessionDurationFor(user.Role)
+	expiresAt := time.Now().Add(duration)
 	if err := h.store.CreateSession(user.ID, tokenHash, expiresAt); err != nil {
 		slog.ErrorContext(r.Context(), "create session error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create session")
@@ -198,7 +208,12 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(loginResponse{
 		Token:     rawToken,
-		ExpiresIn: int(sessionDuration.Seconds()),
+		ExpiresIn: int(duration.Seconds()),
+		User: &loginUser{
+			ID:    user.ID,
+			Email: user.Email,
+			Role:  user.Role,
+		},
 	})
 }
 
@@ -329,9 +344,12 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 		proxy.WriteError(w, r, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
 		return
 	}
-	if req.RateLimit <= 0 {
-		req.RateLimit = 60
+	rl, err := ratelimit.ApplyConfigDefaultsAndCap(req.RateLimit)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "rate_limit_too_high", "invalid_request_error", "rate_limit must be <= 10000")
+		return
 	}
+	req.RateLimit = rl
 
 	rawBytes := make([]byte, 32)
 	if _, err := rand.Read(rawBytes); err != nil {
@@ -574,9 +592,12 @@ func (h *handler) registerServiceAccount(w http.ResponseWriter, r *http.Request)
 		proxy.WriteError(w, r, http.StatusBadRequest, "missing_fields", "invalid_request_error", "registration_token and name are required")
 		return
 	}
-	if req.RateLimit <= 0 {
-		req.RateLimit = 60
+	rl, err := ratelimit.ApplyConfigDefaultsAndCap(req.RateLimit)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "rate_limit_too_high", "invalid_request_error", "rate_limit must be <= 10000")
+		return
 	}
+	req.RateLimit = rl
 
 	// Generate API key
 	rawBytes := make([]byte, 32)

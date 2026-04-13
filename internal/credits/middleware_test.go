@@ -24,6 +24,7 @@ func setupTestStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() {
 		pool := s.Pool()
+		_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS registration_events")
 		_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_holds")
 		_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_transactions")
 		_, _ = pool.Exec(context.Background(), "DROP TABLE IF EXISTS account_usage_stats")
@@ -43,6 +44,7 @@ func setupTestStore(t *testing.T) *store.Store {
 	})
 
 	pool := s.Pool()
+	_, _ = pool.Exec(ctx, "DELETE FROM registration_events")
 	_, _ = pool.Exec(ctx, "DELETE FROM credit_holds")
 	_, _ = pool.Exec(ctx, "DELETE FROM credit_transactions")
 	_, _ = pool.Exec(ctx, "DELETE FROM account_usage_stats")

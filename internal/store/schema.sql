@@ -152,3 +152,23 @@ CREATE TABLE IF NOT EXISTS registration_tokens (
 -- Composite index for session limit sliding window queries
 CREATE INDEX IF NOT EXISTS idx_usage_logs_key_created
     ON usage_logs(api_key_id, created_at);
+
+-- Registration audit trail. Source values (at time of writing):
+--   'public_signup'        — new user via POST /api/auth/register
+--   'registration_token'   — service account via POST /api/accounts/register
+--   'admin_bootstrap'      — first admin or DR admin via /api/admin/bootstrap
+--   'admin_create'         — admin-created user via POST /api/admin/users (future)
+--   'backfill'             — rows inserted by the PR 1 backfill for historical data
+-- The column is TEXT (not an enum) so new sources don't require a migration.
+CREATE TABLE IF NOT EXISTS registration_events (
+    id                      BIGSERIAL PRIMARY KEY,
+    kind                    TEXT NOT NULL,               -- 'user' | 'service'
+    account_id              BIGINT REFERENCES accounts(id),
+    user_id                 BIGINT REFERENCES users(id),
+    registration_token_id   BIGINT REFERENCES registration_tokens(id),
+    source                  TEXT NOT NULL,
+    metadata                JSONB,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_registration_events_created
+    ON registration_events(created_at);

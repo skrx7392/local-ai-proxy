@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
@@ -28,7 +30,29 @@ func setupAdminTest(t *testing.T) (http.Handler, *store.Store) {
 		t.Fatalf("store.New: %v", err)
 	}
 
+	wipe := func(p *pgxpool.Pool) {
+		c := context.Background()
+		_, _ = p.Exec(c, "DELETE FROM registration_events")
+		_, _ = p.Exec(c, "DELETE FROM credit_holds")
+		_, _ = p.Exec(c, "DELETE FROM credit_transactions")
+		_, _ = p.Exec(c, "DELETE FROM account_usage_stats")
+		_, _ = p.Exec(c, "DELETE FROM credit_balances")
+		_, _ = p.Exec(c, "DELETE FROM credit_pricing")
+		_, _ = p.Exec(c, "DELETE FROM registration_tokens")
+		_, _ = p.Exec(c, "DELETE FROM usage_logs")
+		_, _ = p.Exec(c, "DELETE FROM user_sessions")
+		_, _ = p.Exec(c, "DELETE FROM api_keys")
+		_, _ = p.Exec(c, "DELETE FROM users")
+		_, _ = p.Exec(c, "DELETE FROM accounts")
+	}
+
+	// Clean state before and after each test, regardless of pass/fail, so
+	// no data leaks between test invocations or across `go test` runs.
+	pool := s.Pool()
+	wipe(pool)
+
 	t.Cleanup(func() {
+		wipe(s.Pool())
 		s.Close()
 	})
 
@@ -464,6 +488,71 @@ func TestAdmin_ActivateUser_InvalidID(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid ID, got %d", rec.Code)
+	}
+}
+
+func TestAdmin_CreateKey_RateLimitCap(t *testing.T) {
+	h, _ := setupAdminTest(t)
+
+	body := `{"name":"capped-key","rate_limit":10001}`
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for rate_limit > 10000, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &errResp)
+	errObj, _ := errResp["error"].(map[string]any)
+	if code, _ := errObj["code"].(string); code != "rate_limit_too_high" {
+		t.Errorf("expected error code rate_limit_too_high, got %v", errObj["code"])
+	}
+}
+
+func TestAdmin_CreateKey_RateLimitBoundary(t *testing.T) {
+	h, _ := setupAdminTest(t)
+
+	body := `{"name":"boundary-key","rate_limit":10000}`
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewBufferString(body))
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 at boundary 10000, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp createKeyResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.RateLimit != 10000 {
+		t.Errorf("expected stored RateLimit 10000, got %d", resp.RateLimit)
+	}
+}
+
+func TestAdmin_CreateAccountKey_RateLimitCap(t *testing.T) {
+	h, s := setupAdminTest(t)
+
+	accountID, err := s.CreateAccount("cap-test-account", "personal")
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+
+	body := `{"name":"too-fast","rate_limit":10001}`
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/accounts/"+strconv.FormatInt(accountID, 10)+"/keys", bytes.NewBufferString(body))
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for rate_limit > 10000 on account key, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

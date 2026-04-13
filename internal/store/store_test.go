@@ -22,6 +22,7 @@ func setupTestStore(t *testing.T) *Store {
 
 	t.Cleanup(func() {
 		// Drop tables in FK dependency order
+		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS registration_events")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_holds")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_transactions")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS account_usage_stats")
@@ -41,6 +42,7 @@ func setupTestStore(t *testing.T) *Store {
 	})
 
 	// Ensure clean state
+	_, _ = s.pool.Exec(ctx, "DELETE FROM registration_events")
 	_, _ = s.pool.Exec(ctx, "DELETE FROM credit_holds")
 	_, _ = s.pool.Exec(ctx, "DELETE FROM credit_transactions")
 	_, _ = s.pool.Exec(ctx, "DELETE FROM account_usage_stats")
@@ -68,6 +70,7 @@ func TestNew(t *testing.T) {
 		t.Fatalf("New returned error: %v", err)
 	}
 	t.Cleanup(func() {
+		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS registration_events")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_holds")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_transactions")
 		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS account_usage_stats")
