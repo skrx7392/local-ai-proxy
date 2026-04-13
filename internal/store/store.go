@@ -195,11 +195,66 @@ func (s *Store) Pool() *pgxpool.Pool {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, schemaSql)
-	if err != nil {
-		return fmt.Errorf("exec migration: %w", err)
+	// Serialize concurrent migrations against the same database. Without
+	// this, parallel test binaries or pods booting simultaneously can race
+	// on Postgres catalog inserts for CREATE TABLE IF NOT EXISTS and fail
+	// with "duplicate key value violates unique constraint
+	// pg_type_typname_nsp_index" or "deadlock detected". A session-scoped
+	// advisory lock blocks until acquired; we retry briefly on rare
+	// catalog races that slip through.
+	const lockKey int64 = 917230423
+	const maxAttempts = 5
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := func() error {
+			conn, err := s.pool.Acquire(ctx)
+			if err != nil {
+				return fmt.Errorf("acquire conn: %w", err)
+			}
+			defer conn.Release()
+
+			if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, lockKey); err != nil {
+				return fmt.Errorf("acquire migrate lock: %w", err)
+			}
+			defer func() {
+				_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, lockKey)
+			}()
+
+			if _, err := conn.Exec(ctx, schemaSql); err != nil {
+				return fmt.Errorf("exec migration: %w", err)
+			}
+			return nil
+		}()
+
+		if err == nil {
+			return nil
+		}
+		if !isTransientMigrateError(err) {
+			return err
+		}
+		lastErr = err
+		// Brief backoff before retry to let the racing session commit.
+		time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
 	}
-	return nil
+	return lastErr
+}
+
+// isTransientMigrateError reports whether err is one of the catalog-race
+// errors worth retrying during migrate.
+func isTransientMigrateError(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case pgUniqueViolation, // 23505
+		"40P01", // deadlock_detected
+		"42710", // duplicate_object (CREATE INDEX concurrent race)
+		"55000": // object_not_in_prerequisite_state
+		return true
+	}
+	return false
 }
 
 // CreateKey inserts a new API key and returns its ID.

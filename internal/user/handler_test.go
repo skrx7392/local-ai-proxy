@@ -28,11 +28,13 @@ func setupUserTest(t *testing.T) (http.Handler, *store.Store) {
 
 	wipe := func() {
 		c := context.Background()
+		// FK-aware order: delete referencing rows before referenced rows.
 		_, _ = s.Pool().Exec(c, "DELETE FROM registration_events")
 		_, _ = s.Pool().Exec(c, "DELETE FROM credit_holds")
 		_, _ = s.Pool().Exec(c, "DELETE FROM credit_transactions")
 		_, _ = s.Pool().Exec(c, "DELETE FROM account_usage_stats")
 		_, _ = s.Pool().Exec(c, "DELETE FROM credit_balances")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_pricing")
 		_, _ = s.Pool().Exec(c, "DELETE FROM registration_tokens")
 		_, _ = s.Pool().Exec(c, "DELETE FROM usage_logs")
 		_, _ = s.Pool().Exec(c, "DELETE FROM user_sessions")
@@ -41,14 +43,12 @@ func setupUserTest(t *testing.T) (http.Handler, *store.Store) {
 		_, _ = s.Pool().Exec(c, "DELETE FROM accounts")
 	}
 
+	// Clean state before and after each test to eliminate cross-test leakage.
+	wipe()
 	t.Cleanup(func() {
 		wipe()
 		s.Close()
 	})
-
-	// Clean state before each test, not just after — ensures no leakage
-	// from prior runs or a crashed cleanup.
-	wipe()
 
 	h := NewHandler(s, 0)
 	return h, s
