@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/krishna/local-ai-proxy/internal/apierror"
+	"github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
@@ -29,8 +30,9 @@ import (
 const RateLimitPerMinute = 5
 
 type handler struct {
-	store *store.Store
-	token string
+	store   *store.Store
+	token   string
+	metrics *metrics.Metrics
 
 	bucketMu   sync.Mutex
 	tokens     float64
@@ -54,10 +56,11 @@ type bootstrapResponse struct {
 // When adminBootstrapToken is empty the handler returns 404 for every
 // request — the operator rotates the env var in to enable the endpoint
 // and rotates it out again when done.
-func New(dataStore *store.Store, adminBootstrapToken string) http.Handler {
+func New(dataStore *store.Store, adminBootstrapToken string, m *metrics.Metrics) http.Handler {
 	return &handler{
 		store:      dataStore,
 		token:      adminBootstrapToken,
+		metrics:    m,
 		tokens:     RateLimitPerMinute,
 		lastRefill: time.Now(),
 	}
@@ -74,6 +77,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if !h.allow() {
 		w.Header().Set("Retry-After", "12")
+		h.metrics.RecordRateLimitReject()
 		apierror.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Bootstrap rate limit exceeded")
 		slog.InfoContext(r.Context(), "admin bootstrap attempt", "outcome", "rate_limited")
 		return
@@ -120,6 +124,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.InfoContext(r.Context(), "admin bootstrap attempt", "outcome", "success", "email", req.Email, "user_id", userID)
+	h.metrics.RecordRegistration("admin_bootstrap")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/health"
+	"github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
 	"github.com/krishna/local-ai-proxy/internal/store"
@@ -45,6 +46,9 @@ type handler struct {
 	configSnapshot ConfigSnapshot
 	healthChecker  *health.Checker
 	startTime      time.Time
+
+	// BE 6: optional metrics sink. Nil-safe via m.Record* methods.
+	metrics *metrics.Metrics
 }
 
 // Options carries optional dependencies wired by main. Tests that don't touch
@@ -53,6 +57,7 @@ type Options struct {
 	Snapshot  ConfigSnapshot
 	Checker   *health.Checker
 	StartTime time.Time
+	Metrics   *metrics.Metrics
 }
 
 type adminSessionCtxKey struct{}
@@ -97,6 +102,7 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 		configSnapshot:    opts.Snapshot,
 		healthChecker:     opts.Checker,
 		startTime:         opts.StartTime,
+		metrics:           opts.Metrics,
 	}
 
 	mux := http.NewServeMux()
@@ -152,11 +158,13 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 		// emergency access, and the bootstrap flow.
 		if provided := r.Header.Get("X-Admin-Key"); provided != "" {
 			if subtle.ConstantTimeCompare([]byte(provided), []byte(h.adminKey)) != 1 {
+				h.metrics.RecordAdminAuthFailure("invalid_admin_key")
 				proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_admin_key", "invalid_api_key", "Invalid admin key")
 				return
 			}
 			if !h.adminAllow() {
 				w.Header().Set("Retry-After", "6")
+				h.metrics.RecordRateLimitReject()
 				proxy.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Admin rate limit exceeded")
 				return
 			}
@@ -167,6 +175,7 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 		// Bearer session path: used by the admin UI via the next-auth BFF.
 		rawToken := extractBearer(r)
 		if rawToken == "" {
+			h.metrics.RecordAdminAuthFailure("missing_credentials")
 			proxy.WriteError(w, r, http.StatusUnauthorized, "missing_admin_key", "invalid_api_key", "Missing X-Admin-Key header or Bearer session token")
 			return
 		}
@@ -178,6 +187,7 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if session == nil {
+			h.metrics.RecordAdminAuthFailure("invalid_session")
 			proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_session", "invalid_api_key", "Invalid session token")
 			return
 		}
@@ -185,6 +195,7 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 			if err := h.store.DeleteSession(tokenHash); err != nil {
 				slog.WarnContext(r.Context(), "delete expired admin session", "error", err)
 			}
+			h.metrics.RecordAdminAuthFailure("session_expired")
 			proxy.WriteError(w, r, http.StatusUnauthorized, "session_expired", "invalid_api_key", "Session has expired")
 			return
 		}
@@ -195,19 +206,23 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if u == nil {
+			h.metrics.RecordAdminAuthFailure("user_not_found")
 			proxy.WriteError(w, r, http.StatusUnauthorized, "user_not_found", "invalid_api_key", "User not found")
 			return
 		}
 		if !u.IsActive {
+			h.metrics.RecordAdminAuthFailure("account_disabled")
 			proxy.WriteError(w, r, http.StatusForbidden, "account_disabled", "invalid_request_error", "Account is disabled")
 			return
 		}
 		if u.Role != "admin" {
+			h.metrics.RecordAdminAuthFailure("not_admin")
 			proxy.WriteError(w, r, http.StatusForbidden, "not_admin", "invalid_request_error", "Admin role required")
 			return
 		}
 		if !h.sessionLimiter.Allow(tokenHash) {
 			w.Header().Set("Retry-After", "1")
+			h.metrics.RecordRateLimitReject()
 			proxy.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Admin rate limit exceeded")
 			return
 		}

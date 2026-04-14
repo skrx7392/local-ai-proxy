@@ -52,7 +52,11 @@ func seedAnalyticsFixture(t *testing.T, s *Store) analyticsFixture {
 		t.Fatalf("CreateKeyForAccountOnly: %v", err)
 	}
 
-	t0 := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Hour)
+	// Day-align t0 so tests that assert day-bucket counts are deterministic
+	// regardless of wall-clock hour. Hour-bucket tests still see 9 distinct
+	// hour offsets (0,1,2,3,4,5,25,26,27) because those are computed relative
+	// to t0, not absolute UTC hours.
+	t0 := time.Now().UTC().Add(-48 * time.Hour).Truncate(24 * time.Hour)
 
 	// Model A rows for user (various times, all success).
 	rows := []struct {
@@ -447,10 +451,10 @@ func TestGetUsageTimeseries_DayBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUsageTimeseries: %v", err)
 	}
-	// Rows span two UTC days (t0-t0+5h, t0+25h-t0+27h), which may collapse
-	// into 1 or 2 day buckets depending on t0 alignment. Require 1 or 2.
-	if len(buckets) < 1 || len(buckets) > 2 {
-		t.Errorf("expected 1-2 day buckets, got %d", len(buckets))
+	// With t0 day-aligned, rows at offsets 0-5h fall in day N and 25-27h
+	// in day N+1 — exactly 2 day buckets.
+	if len(buckets) != 2 {
+		t.Errorf("expected 2 day buckets, got %d", len(buckets))
 	}
 }
 

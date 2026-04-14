@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/krishna/local-ai-proxy/internal/admin"
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/bootstrap"
@@ -26,6 +28,29 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/store"
 	"github.com/krishna/local-ai-proxy/internal/user"
 )
+
+// poolStatProvider adapts *pgxpool.Pool to appmetrics.PoolStatProvider,
+// keeping the metrics package free of a pgx dependency.
+type poolStatProvider struct{ pool *pgxpool.Pool }
+
+func (p poolStatProvider) Stat() appmetrics.PoolStat {
+	s := p.pool.Stat()
+	return appmetrics.PoolStat{
+		Total:            s.TotalConns(),
+		Acquired:         s.AcquiredConns(),
+		Idle:             s.IdleConns(),
+		Max:              s.MaxConns(),
+		Constructing:     s.ConstructingConns(),
+		AcquireCount:     s.AcquireCount(),
+		AcquireDuration:  s.AcquireDuration(),
+		NewConns:         s.NewConnsCount(),
+		LifetimeDestroys: s.MaxLifetimeDestroyCount(),
+		IdleDestroys:     s.MaxIdleDestroyCount(),
+		EmptyAcquires:    s.EmptyAcquireCount(),
+		CanceledAcquires: s.CanceledAcquireCount(),
+		EmptyAcquireWait: s.EmptyAcquireWaitTime(),
+	}
+}
 
 // Populated at build time via -ldflags "-X main.version=... -X main.buildTime=...".
 // See deploy/Dockerfile. Must be string-typed package-level vars for -X to
@@ -130,14 +155,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start credit hold sweeper goroutines
+	m := appmetrics.New(func() int { return len(usageCh) })
+	m.RegisterPoolCollector(poolStatProvider{pool: db.Pool()})
+
+	// Start credit hold sweeper goroutines (after metrics so counters are wired)
 	sweeperCtx, sweeperCancel := context.WithCancel(context.Background())
-	credits.StartSweeper(sweeperCtx, db,
+	credits.StartSweeper(sweeperCtx, db, m,
 		10*time.Minute, 10*time.Minute, // stale hold sweep every 10 min
 		6*time.Hour, 30*24*time.Hour, // cleanup old holds every 6 hrs
 	)
-
-	m := appmetrics.New(func() int { return len(usageCh) })
 
 	limiter := ratelimit.New()
 	proxyHandler := proxy.NewHandler(ollamaURL, usageCh, cfg.MaxRequestBody, db, m)
@@ -169,9 +195,10 @@ func main() {
 		Snapshot:  configSnapshot,
 		Checker:   hc,
 		StartTime: startTime,
+		Metrics:   m,
 	})
-	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken)
-	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant)
+	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken, m)
+	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant, m)
 
 	mux := http.NewServeMux()
 
