@@ -162,7 +162,19 @@ type Session struct {
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse database url: %w", err)
+	}
+	// Pin every pooled connection to UTC so date_trunc, CURRENT_DATE, NOW()
+	// and other time-returning functions are session-TZ-independent. Without
+	// this, analytics bucket boundaries would drift based on the database
+	// role or server default.
+	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+		_, err := c.Exec(ctx, "SET TIME ZONE 'UTC'")
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
