@@ -227,9 +227,15 @@ func (s *Store) GetUsageTimeseries(f UsageFilter, interval string) ([]Timeseries
 	}
 
 	var sb strings.Builder
+	// date_trunc on a TIMESTAMPTZ operates in the session TimeZone, so without
+	// AT TIME ZONE 'UTC' a non-UTC session (e.g. America/Los_Angeles) returns
+	// bucket boundaries that are UTC-misaligned. The handler gap-fill keys on
+	// UTC times, so misaligned buckets would silently drop real rows. Keeping
+	// the truncation explicitly UTC removes that coupling; the pool also pins
+	// session TZ to UTC as defense in depth.
 	sb.WriteString(
 		`SELECT
-		   date_trunc($1, ul.created_at),
+		   date_trunc($1, ul.created_at AT TIME ZONE 'UTC'),
 		   COUNT(*),
 		   COALESCE(SUM(ul.prompt_tokens), 0),
 		   COALESCE(SUM(ul.completion_tokens), 0),
