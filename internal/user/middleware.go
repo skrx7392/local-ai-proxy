@@ -12,13 +12,35 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
-const sessionDuration = 7 * 24 * time.Hour
+const (
+	UserSessionDuration  = 7 * 24 * time.Hour
+	AdminSessionDuration = 6 * time.Hour
+)
+
+// sessionDuration is retained for existing callers that don't know the role.
+// New code should prefer SessionDurationFor(role).
+const sessionDuration = UserSessionDuration
 
 type userContextKey struct{}
 type sessionContextKey struct{}
 
+// SessionDurationFor returns how long a newly minted session should live based
+// on the user's role. Admin sessions expire faster to limit blast radius.
+func SessionDurationFor(role string) time.Duration {
+	if role == "admin" {
+		return AdminSessionDuration
+	}
+	return UserSessionDuration
+}
+
 func sessionExpiry() time.Time {
 	return time.Now().Add(sessionDuration)
+}
+
+// SessionExpiryFor returns the absolute expiry time for a newly minted session
+// given the user's role.
+func SessionExpiryFor(role string) time.Time {
+	return time.Now().Add(SessionDurationFor(role))
 }
 
 // SessionMiddleware returns HTTP middleware that validates session tokens.

@@ -3,12 +3,36 @@ package store
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrEmailExists is returned by user-creation helpers when the email is
+// already taken, so callers can map to 409 without inspecting SQL errors.
+var ErrEmailExists = errors.New("email already exists")
+
+// ErrLastActiveAdmin is returned when a mutation would leave the system
+// without any active admin (role='admin' AND is_active=TRUE). Callers
+// map this to 409 "last_admin".
+var ErrLastActiveAdmin = errors.New("cannot remove the last active admin")
+
+// ErrUserNotFound is returned by mutation helpers when the target row
+// does not exist.
+var ErrUserNotFound = errors.New("user not found")
+
+// pgUniqueViolation is the Postgres SQLSTATE code for unique constraint
+// violations. Used to distinguish "email already taken" from other errors.
+const pgUniqueViolation = "23505"
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
+}
 
 //go:embed schema.sql
 var schemaSql string
@@ -171,11 +195,66 @@ func (s *Store) Pool() *pgxpool.Pool {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, schemaSql)
-	if err != nil {
-		return fmt.Errorf("exec migration: %w", err)
+	// Serialize concurrent migrations against the same database. Without
+	// this, parallel test binaries or pods booting simultaneously can race
+	// on Postgres catalog inserts for CREATE TABLE IF NOT EXISTS and fail
+	// with "duplicate key value violates unique constraint
+	// pg_type_typname_nsp_index" or "deadlock detected". A session-scoped
+	// advisory lock blocks until acquired; we retry briefly on rare
+	// catalog races that slip through.
+	const lockKey int64 = 917230423
+	const maxAttempts = 5
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := func() error {
+			conn, err := s.pool.Acquire(ctx)
+			if err != nil {
+				return fmt.Errorf("acquire conn: %w", err)
+			}
+			defer conn.Release()
+
+			if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, lockKey); err != nil {
+				return fmt.Errorf("acquire migrate lock: %w", err)
+			}
+			defer func() {
+				_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, lockKey)
+			}()
+
+			if _, err := conn.Exec(ctx, schemaSql); err != nil {
+				return fmt.Errorf("exec migration: %w", err)
+			}
+			return nil
+		}()
+
+		if err == nil {
+			return nil
+		}
+		if !isTransientMigrateError(err) {
+			return err
+		}
+		lastErr = err
+		// Brief backoff before retry to let the racing session commit.
+		time.Sleep(time.Duration(50*(attempt+1)) * time.Millisecond)
 	}
-	return nil
+	return lastErr
+}
+
+// isTransientMigrateError reports whether err is one of the catalog-race
+// errors worth retrying during migrate.
+func isTransientMigrateError(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case pgUniqueViolation, // 23505
+		"40P01", // deadlock_detected
+		"42710", // duplicate_object (CREATE INDEX concurrent race)
+		"55000": // object_not_in_prerequisite_state
+		return true
+	}
+	return false
 }
 
 // CreateKey inserts a new API key and returns its ID.
@@ -371,6 +450,61 @@ func (s *Store) SetUserActive(id int64, active bool) error {
 	}
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("user not found")
+	}
+	return nil
+}
+
+// DeactivateUserGuarded deactivates a user, refusing to do so if that would
+// leave zero active admins. Two concurrent calls targeting different admin
+// rows cannot both succeed — they serialize on a Postgres advisory lock so
+// the second transaction sees the first's decrement before its COUNT.
+func (s *Store) DeactivateUserGuarded(id int64) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Serialize all admin-affecting mutations against each other. Plain
+	// users/scripts that aren't admins proceed concurrently.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('admin_mutations'))`); err != nil {
+		return fmt.Errorf("advisory lock: %w", err)
+	}
+
+	var currentRole string
+	var currentActive bool
+	err = tx.QueryRow(ctx,
+		`SELECT role, is_active FROM users WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&currentRole, &currentActive)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrUserNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load user: %w", err)
+	}
+
+	// If the target is an active admin, make sure at least one other remains.
+	if currentRole == "admin" && currentActive {
+		var activeAdmins int
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = TRUE`,
+		).Scan(&activeAdmins); err != nil {
+			return fmt.Errorf("count active admins: %w", err)
+		}
+		if activeAdmins <= 1 {
+			return ErrLastActiveAdmin
+		}
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1`, id,
+	); err != nil {
+		return fmt.Errorf("deactivate: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -579,6 +713,61 @@ func (s *Store) RegisterUser(email, passwordHash, name string) (int64, int64, er
 		return 0, 0, fmt.Errorf("commit: %w", err)
 	}
 	return accountID, userID, nil
+}
+
+// CreateAdminBootstrap atomically creates an admin user together with its
+// personal account, initial credit balance, and a registration_events audit
+// row (source='admin_bootstrap'). Returns the new user ID.
+//
+// On a duplicate email, returns ErrEmailExists so callers can map to 409
+// without inspecting SQLSTATE themselves.
+func (s *Store) CreateAdminBootstrap(email, passwordHash, name string) (int64, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var accountID int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO accounts (name, type) VALUES ($1, 'personal') RETURNING id`, name,
+	).Scan(&accountID); err != nil {
+		return 0, fmt.Errorf("create account: %w", err)
+	}
+
+	var userID int64
+	err = tx.QueryRow(ctx,
+		`INSERT INTO users (email, password_hash, name, role, is_active, account_id)
+		 VALUES ($1, $2, $3, 'admin', TRUE, $4) RETURNING id`,
+		email, passwordHash, name, accountID,
+	).Scan(&userID)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return 0, ErrEmailExists
+		}
+		return 0, fmt.Errorf("create user: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO credit_balances (account_id) VALUES ($1) ON CONFLICT DO NOTHING`,
+		accountID,
+	); err != nil {
+		return 0, fmt.Errorf("init credit balance: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO registration_events (kind, account_id, user_id, source)
+		 VALUES ('user', $1, $2, 'admin_bootstrap')`,
+		accountID, userID,
+	); err != nil {
+		return 0, fmt.Errorf("record registration_event: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return userID, nil
 }
 
 // BackfillAccounts creates personal accounts for existing users without one,

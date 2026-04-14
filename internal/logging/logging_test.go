@@ -108,3 +108,30 @@ func TestRequestIDFromContext_Empty(t *testing.T) {
 		t.Errorf("expected empty string, got %q", got)
 	}
 }
+
+func TestContextHandler_WithAttrsAndWithGroup(t *testing.T) {
+	var buf bytes.Buffer
+	inner := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	ch := &ContextHandler{Inner: inner}
+
+	withAttrs := ch.WithAttrs([]slog.Attr{slog.String("component", "api")})
+	if _, ok := withAttrs.(*ContextHandler); !ok {
+		t.Fatal("WithAttrs should return a *ContextHandler")
+	}
+
+	withGroup := ch.WithGroup("request")
+	if _, ok := withGroup.(*ContextHandler); !ok {
+		t.Fatal("WithGroup should return a *ContextHandler")
+	}
+
+	// Exercise the combined handler end-to-end to make sure records flow.
+	logger := slog.New(withAttrs)
+	logger.InfoContext(context.Background(), "hello")
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out["component"] != "api" {
+		t.Errorf("expected component=api attribute to flow through, got %+v", out)
+	}
+}

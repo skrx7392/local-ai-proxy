@@ -26,20 +26,29 @@ func setupUserTest(t *testing.T) (http.Handler, *store.Store) {
 		t.Fatalf("store.New: %v", err)
 	}
 
+	wipe := func() {
+		c := context.Background()
+		// FK-aware order: delete referencing rows before referenced rows.
+		_, _ = s.Pool().Exec(c, "DELETE FROM registration_events")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_holds")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_transactions")
+		_, _ = s.Pool().Exec(c, "DELETE FROM account_usage_stats")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_balances")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_pricing")
+		_, _ = s.Pool().Exec(c, "DELETE FROM registration_tokens")
+		_, _ = s.Pool().Exec(c, "DELETE FROM usage_logs")
+		_, _ = s.Pool().Exec(c, "DELETE FROM user_sessions")
+		_, _ = s.Pool().Exec(c, "DELETE FROM api_keys")
+		_, _ = s.Pool().Exec(c, "DELETE FROM users")
+		_, _ = s.Pool().Exec(c, "DELETE FROM accounts")
+	}
+
+	// Clean state before and after each test to eliminate cross-test leakage.
+	wipe()
 	t.Cleanup(func() {
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS usage_logs")
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS user_sessions")
-		_, _ = s.Pool().Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS user_id")
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS api_keys")
-		_, _ = s.Pool().Exec(context.Background(), "DROP TABLE IF EXISTS users")
+		wipe()
 		s.Close()
 	})
-
-	// Clean state
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM usage_logs")
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM user_sessions")
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM api_keys")
-	_, _ = s.Pool().Exec(ctx, "DELETE FROM users")
 
 	h := NewHandler(s, 0)
 	return h, s
@@ -191,6 +200,98 @@ func TestLogin_Success(t *testing.T) {
 	}
 	if resp.ExpiresIn <= 0 {
 		t.Errorf("expected positive expires_in, got %d", resp.ExpiresIn)
+	}
+}
+
+func TestLogin_Success_IncludesUserWithRole(t *testing.T) {
+	h, _ := setupUserTest(t)
+
+	// Register
+	body := `{"email":"role@example.com","password":"securepass123","name":"Role User"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Login
+	loginBody := `{"email":"role@example.com","password":"securepass123"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp loginResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.User == nil {
+		t.Fatal("expected user object in login response")
+	}
+	if resp.User.Role != "user" {
+		t.Errorf("expected role 'user', got %q", resp.User.Role)
+	}
+	if resp.User.Email != "role@example.com" {
+		t.Errorf("expected email 'role@example.com', got %q", resp.User.Email)
+	}
+	if resp.User.ID == 0 {
+		t.Error("expected non-zero user id")
+	}
+	// 7 days for a regular user
+	expectedSecs := int((7 * 24 * 60 * 60))
+	// Allow slight drift; must be within a reasonable range of the target duration
+	if resp.ExpiresIn < expectedSecs-60 || resp.ExpiresIn > expectedSecs+60 {
+		t.Errorf("expected ~%d expires_in for user role, got %d", expectedSecs, resp.ExpiresIn)
+	}
+}
+
+func TestLogin_AdminRoleHasShorterExpiry(t *testing.T) {
+	h, s := setupUserTest(t)
+
+	// Register
+	body := `{"email":"admin-login@example.com","password":"securepass123","name":"Admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Promote to admin directly via the store
+	u, err := s.GetUserByEmail("admin-login@example.com")
+	if err != nil || u == nil {
+		t.Fatalf("get user: %v", err)
+	}
+	_, err = s.Pool().Exec(context.Background(), `UPDATE users SET role = 'admin' WHERE id = $1`, u.ID)
+	if err != nil {
+		t.Fatalf("set role: %v", err)
+	}
+
+	// Login
+	loginBody := `{"email":"admin-login@example.com","password":"securepass123"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp loginResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.User == nil || resp.User.Role != "admin" {
+		t.Fatalf("expected user.role=admin, got %+v", resp.User)
+	}
+	expectedSecs := int((6 * 60 * 60))
+	if resp.ExpiresIn < expectedSecs-60 || resp.ExpiresIn > expectedSecs+60 {
+		t.Errorf("expected ~%d expires_in for admin role, got %d", expectedSecs, resp.ExpiresIn)
 	}
 }
 

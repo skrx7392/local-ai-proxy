@@ -67,6 +67,34 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 }
 
+func TestLoad_AdminBootstrapToken_DefaultEmpty(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("ADMIN_BOOTSTRAP_TOKEN", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminBootstrapToken != "" {
+		t.Errorf("expected empty AdminBootstrapToken, got %q", cfg.AdminBootstrapToken)
+	}
+}
+
+func TestLoad_AdminBootstrapToken_WhenSet(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("ADMIN_BOOTSTRAP_TOKEN", "super-secret-bootstrap")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminBootstrapToken != "super-secret-bootstrap" {
+		t.Errorf("expected AdminBootstrapToken 'super-secret-bootstrap', got %q", cfg.AdminBootstrapToken)
+	}
+}
+
 func TestLoad_CustomLogLevel(t *testing.T) {
 	t.Setenv("ADMIN_KEY", "key")
 	t.Setenv("DATABASE_URL", "postgres://localhost/db")

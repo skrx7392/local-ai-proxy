@@ -1,18 +1,22 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
+	"github.com/krishna/local-ai-proxy/internal/ratelimit"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
@@ -21,10 +25,22 @@ type handler struct {
 	adminKey string
 	usageCh  chan<- store.UsageEntry
 
-	// Admin rate limiter: 10 req/min, single bucket
+	// X-Admin-Key rate limiter: 10 req/min, single bucket shared across all scripts/automation.
 	rateLimitMu       sync.Mutex
 	rateLimitTokens   float64
 	rateLimitLastTime time.Time
+
+	// Bearer session rate limiter: 300 req/min, one bucket per session (keyed by token hash).
+	sessionLimiter *sessionLimiter
+}
+
+type adminSessionCtxKey struct{}
+
+// AdminSessionFromContext retrieves the admin session attached by authMiddleware,
+// or nil if the request was authenticated via X-Admin-Key.
+func AdminSessionFromContext(ctx context.Context) *store.Session {
+	s, _ := ctx.Value(adminSessionCtxKey{}).(*store.Session)
+	return s
 }
 
 type createKeyRequest struct {
@@ -56,6 +72,7 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 		usageCh:           usageCh,
 		rateLimitTokens:   10,
 		rateLimitLastTime: time.Now(),
+		sessionLimiter:    newSessionLimiter(),
 	}
 
 	mux := http.NewServeMux()
@@ -90,25 +107,81 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 
 func (h *handler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		provided := r.Header.Get("X-Admin-Key")
-		if provided == "" {
-			proxy.WriteError(w, r, http.StatusUnauthorized, "missing_admin_key", "invalid_api_key", "Missing X-Admin-Key header")
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.adminKey)) != 1 {
-			proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_admin_key", "invalid_api_key", "Invalid admin key")
+		// X-Admin-Key path takes precedence over Bearer. Used by scripts,
+		// emergency access, and the bootstrap flow.
+		if provided := r.Header.Get("X-Admin-Key"); provided != "" {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(h.adminKey)) != 1 {
+				proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_admin_key", "invalid_api_key", "Invalid admin key")
+				return
+			}
+			if !h.adminAllow() {
+				w.Header().Set("Retry-After", "6")
+				proxy.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Admin rate limit exceeded")
+				return
+			}
+			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Admin rate limiting: 10 req/min
-		if !h.adminAllow() {
-			w.Header().Set("Retry-After", "6")
+		// Bearer session path: used by the admin UI via the next-auth BFF.
+		rawToken := extractBearer(r)
+		if rawToken == "" {
+			proxy.WriteError(w, r, http.StatusUnauthorized, "missing_admin_key", "invalid_api_key", "Missing X-Admin-Key header or Bearer session token")
+			return
+		}
+		tokenHash := auth.HashKey(rawToken)
+		session, err := h.store.GetSessionByTokenHash(tokenHash)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "admin session lookup error", "error", err)
+			proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Internal error")
+			return
+		}
+		if session == nil {
+			proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_session", "invalid_api_key", "Invalid session token")
+			return
+		}
+		if time.Now().After(session.ExpiresAt) {
+			if err := h.store.DeleteSession(tokenHash); err != nil {
+				slog.WarnContext(r.Context(), "delete expired admin session", "error", err)
+			}
+			proxy.WriteError(w, r, http.StatusUnauthorized, "session_expired", "invalid_api_key", "Session has expired")
+			return
+		}
+		u, err := h.store.GetUserByID(session.UserID)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "admin user lookup error", "error", err)
+			proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Internal error")
+			return
+		}
+		if u == nil {
+			proxy.WriteError(w, r, http.StatusUnauthorized, "user_not_found", "invalid_api_key", "User not found")
+			return
+		}
+		if !u.IsActive {
+			proxy.WriteError(w, r, http.StatusForbidden, "account_disabled", "invalid_request_error", "Account is disabled")
+			return
+		}
+		if u.Role != "admin" {
+			proxy.WriteError(w, r, http.StatusForbidden, "not_admin", "invalid_request_error", "Admin role required")
+			return
+		}
+		if !h.sessionLimiter.Allow(tokenHash) {
+			w.Header().Set("Retry-After", "1")
 			proxy.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Admin rate limit exceeded")
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), adminSessionCtxKey{}, session)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func extractBearer(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return ""
+	}
+	return strings.TrimPrefix(authHeader, "Bearer ")
 }
 
 func (h *handler) adminAllow() bool {
@@ -137,9 +210,12 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 		proxy.WriteError(w, r, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
 		return
 	}
-	if req.RateLimit <= 0 {
-		req.RateLimit = 60
+	rateLimit, err := ratelimit.ApplyConfigDefaultsAndCap(req.RateLimit)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "rate_limit_too_high", "invalid_request_error", "rate_limit must be <= 10000")
+		return
 	}
+	req.RateLimit = rateLimit
 
 	// Generate random key
 	rawBytes := make([]byte, 32)
@@ -287,14 +363,6 @@ func (h *handler) listUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) activateUser(w http.ResponseWriter, r *http.Request) {
-	h.setUserActiveHandler(w, r, true)
-}
-
-func (h *handler) deactivateUser(w http.ResponseWriter, r *http.Request) {
-	h.setUserActiveHandler(w, r, false)
-}
-
-func (h *handler) setUserActiveHandler(w http.ResponseWriter, r *http.Request, active bool) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -302,22 +370,45 @@ func (h *handler) setUserActiveHandler(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
-	if err := h.store.SetUserActive(id, active); err != nil {
+	// Activation is monotonic (can only add admins) and doesn't need the guardrail.
+	if err := h.store.SetUserActive(id, true); err != nil {
 		if err.Error() == "user not found" {
 			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "User not found")
 			return
 		}
-		slog.ErrorContext(r.Context(), "set user active error", "error", err, "user_id", id)
+		slog.ErrorContext(r.Context(), "activate user error", "error", err, "user_id", id)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update user")
 		return
 	}
 
-	status := "activated"
-	if !active {
-		status = "deactivated"
-	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": status})
+	json.NewEncoder(w).Encode(map[string]string{"status": "activated"})
+}
+
+func (h *handler) deactivateUser(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid user ID")
+		return
+	}
+
+	if err := h.store.DeactivateUserGuarded(id); err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "User not found")
+			return
+		}
+		if errors.Is(err, store.ErrLastActiveAdmin) {
+			proxy.WriteError(w, r, http.StatusConflict, "last_admin", "invalid_request_error", "Cannot remove the last active admin")
+			return
+		}
+		slog.ErrorContext(r.Context(), "deactivate user error", "error", err, "user_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update user")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "deactivated"})
 }
 
 // --- Credit management ---
@@ -410,9 +501,12 @@ func (h *handler) createAccountKey(w http.ResponseWriter, r *http.Request) {
 		proxy.WriteError(w, r, http.StatusBadRequest, "missing_name", "invalid_request_error", "name is required")
 		return
 	}
-	if req.RateLimit <= 0 {
-		req.RateLimit = 60
+	rateLimit, err := ratelimit.ApplyConfigDefaultsAndCap(req.RateLimit)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "rate_limit_too_high", "invalid_request_error", "rate_limit must be <= 10000")
+		return
 	}
+	req.RateLimit = rateLimit
 
 	rawBytes := make([]byte, 32)
 	if _, err := rand.Read(rawBytes); err != nil {

@@ -41,6 +41,7 @@ func setupTestDB(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() {
 		pool := s.Pool()
+		_, _ = pool.Exec(context.Background(), "DELETE FROM registration_events")
 		_, _ = pool.Exec(context.Background(), "DELETE FROM credit_holds")
 		_, _ = pool.Exec(context.Background(), "DELETE FROM credit_transactions")
 		_, _ = pool.Exec(context.Background(), "DELETE FROM account_usage_stats")
@@ -55,6 +56,7 @@ func setupTestDB(t *testing.T) *store.Store {
 		s.Close()
 	})
 	pool := s.Pool()
+	_, _ = pool.Exec(ctx, "DELETE FROM registration_events")
 	_, _ = pool.Exec(ctx, "DELETE FROM credit_holds")
 	_, _ = pool.Exec(ctx, "DELETE FROM credit_transactions")
 	_, _ = pool.Exec(ctx, "DELETE FROM account_usage_stats")

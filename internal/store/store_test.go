@@ -20,38 +20,30 @@ func setupTestStore(t *testing.T) *Store {
 		t.Fatalf("New: %v", err)
 	}
 
+	wipe := func() {
+		c := context.Background()
+		// FK-aware order: delete referencing rows before referenced rows.
+		_, _ = s.pool.Exec(c, "DELETE FROM registration_events")
+		_, _ = s.pool.Exec(c, "DELETE FROM credit_holds")
+		_, _ = s.pool.Exec(c, "DELETE FROM credit_transactions")
+		_, _ = s.pool.Exec(c, "DELETE FROM account_usage_stats")
+		_, _ = s.pool.Exec(c, "DELETE FROM credit_balances")
+		_, _ = s.pool.Exec(c, "DELETE FROM credit_pricing")
+		_, _ = s.pool.Exec(c, "DELETE FROM registration_tokens")
+		_, _ = s.pool.Exec(c, "DELETE FROM usage_logs")
+		_, _ = s.pool.Exec(c, "DELETE FROM user_sessions")
+		_, _ = s.pool.Exec(c, "DELETE FROM api_keys")
+		_, _ = s.pool.Exec(c, "DELETE FROM users")
+		_, _ = s.pool.Exec(c, "DELETE FROM accounts")
+	}
+
+	// Clean state before and after each test. DELETE (not DROP) so that
+	// concurrent test runs don't race on Postgres catalog locks during migrate.
+	wipe()
 	t.Cleanup(func() {
-		// Drop tables in FK dependency order
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_holds")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_transactions")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS account_usage_stats")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_balances")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_pricing")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS registration_tokens")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS usage_logs")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS user_sessions")
-		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS user_id")
-		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS account_id")
-		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS session_token_limit")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS api_keys")
-		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE users DROP COLUMN IF EXISTS account_id")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS users")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS accounts")
+		wipe()
 		s.Close()
 	})
-
-	// Ensure clean state
-	_, _ = s.pool.Exec(ctx, "DELETE FROM credit_holds")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM credit_transactions")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM account_usage_stats")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM credit_balances")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM credit_pricing")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM registration_tokens")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM usage_logs")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM user_sessions")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM api_keys")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM users")
-	_, _ = s.pool.Exec(ctx, "DELETE FROM accounts")
 
 	return s
 }
@@ -68,21 +60,21 @@ func TestNew(t *testing.T) {
 		t.Fatalf("New returned error: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_holds")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_transactions")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS account_usage_stats")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_balances")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS credit_pricing")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS registration_tokens")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS usage_logs")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS user_sessions")
-		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS user_id")
-		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS account_id")
-		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE api_keys DROP COLUMN IF EXISTS session_token_limit")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS api_keys")
-		_, _ = s.pool.Exec(context.Background(), "ALTER TABLE users DROP COLUMN IF EXISTS account_id")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS users")
-		_, _ = s.pool.Exec(context.Background(), "DROP TABLE IF EXISTS accounts")
+		c := context.Background()
+		// DELETE rather than DROP so concurrent tests don't race on Postgres
+		// catalog locks during migrate.
+		_, _ = s.pool.Exec(c, "DELETE FROM registration_events")
+		_, _ = s.pool.Exec(c, "DELETE FROM credit_holds")
+		_, _ = s.pool.Exec(c, "DELETE FROM credit_transactions")
+		_, _ = s.pool.Exec(c, "DELETE FROM account_usage_stats")
+		_, _ = s.pool.Exec(c, "DELETE FROM credit_balances")
+		_, _ = s.pool.Exec(c, "DELETE FROM credit_pricing")
+		_, _ = s.pool.Exec(c, "DELETE FROM registration_tokens")
+		_, _ = s.pool.Exec(c, "DELETE FROM usage_logs")
+		_, _ = s.pool.Exec(c, "DELETE FROM user_sessions")
+		_, _ = s.pool.Exec(c, "DELETE FROM api_keys")
+		_, _ = s.pool.Exec(c, "DELETE FROM users")
+		_, _ = s.pool.Exec(c, "DELETE FROM accounts")
 		s.Close()
 	})
 
