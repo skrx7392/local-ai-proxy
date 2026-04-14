@@ -20,6 +20,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Connect to Tailscale
         uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
@@ -32,6 +34,7 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DEV_SERVER_SSH_KEY }}
           ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          ADMIN_BOOTSTRAP_TOKEN: ${{ secrets.ADMIN_BOOTSTRAP_TOKEN }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
         run: |
@@ -49,6 +52,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no sk@100.108.60.90 "export KUBECONFIG=/home/sk/.kube/config && \
             sudo kubectl -n local-ai create secret generic proxy-secret \
               --from-literal=ADMIN_KEY='${ADMIN_KEY}' \
+              --from-literal=ADMIN_BOOTSTRAP_TOKEN='${ADMIN_BOOTSTRAP_TOKEN}' \
               --from-literal=DATABASE_URL='${DATABASE_URL}' \
               --dry-run=client -o yaml | sudo kubectl apply -f -"
 
@@ -69,5 +73,5 @@ jobs:
              sudo kubectl apply -f deploy/k8s/service.yaml && \
              sudo kubectl apply -f deploy/k8s/ingress.yaml && \
              sudo kubectl apply -f deploy/k8s/deployment.yaml && \
-             sudo kubectl -n local-ai rollout restart deployment/ai-proxy && \
+             sudo kubectl -n local-ai set image deployment/ai-proxy ai-proxy=local-ai-proxy:${SHORT_SHA} && \
              sudo kubectl -n local-ai rollout status deployment/ai-proxy --timeout=120s"
