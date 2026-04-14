@@ -268,6 +268,68 @@ func (s *Store) GetUsageTimeseries(f UsageFilter, interval string) ([]Timeseries
 	return out, rows.Err()
 }
 
+// RegistrationEvent is one row of the admin /registrations feed. Enriched
+// with user email/name and account name/type via LEFT JOIN so the admin UI
+// can render owner info without extra round trips.
+type RegistrationEvent struct {
+	ID                  int64
+	Kind                string
+	Source              string
+	UserID              *int64
+	UserEmail           *string
+	UserName            *string
+	AccountID           *int64
+	AccountName         *string
+	AccountType         *string
+	RegistrationTokenID *int64
+	Metadata            []byte // raw JSONB, may be nil
+	CreatedAt           time.Time
+}
+
+// ListRegistrationEvents returns a page of registration_events rows ordered
+// newest-first, enriched with the related user + account fields. Returns
+// (rows, total, err) where total is the pre-slice count for pagination.
+func (s *Store) ListRegistrationEvents(limit, offset int) ([]RegistrationEvent, int, error) {
+	ctx := context.Background()
+
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM registration_events`).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count registration_events: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT e.id, e.kind, e.source,
+		        e.user_id, u.email, u.name,
+		        e.account_id, a.name, a.type,
+		        e.registration_token_id, e.metadata, e.created_at
+		 FROM registration_events e
+		 LEFT JOIN users u    ON u.id = e.user_id
+		 LEFT JOIN accounts a ON a.id = e.account_id
+		 ORDER BY e.created_at DESC, e.id DESC
+		 LIMIT $1 OFFSET $2`,
+		limit, offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list registration_events: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]RegistrationEvent, 0)
+	for rows.Next() {
+		var ev RegistrationEvent
+		if err := rows.Scan(
+			&ev.ID, &ev.Kind, &ev.Source,
+			&ev.UserID, &ev.UserEmail, &ev.UserName,
+			&ev.AccountID, &ev.AccountName, &ev.AccountType,
+			&ev.RegistrationTokenID, &ev.Metadata, &ev.CreatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan registration_event: %w", err)
+		}
+		out = append(out, ev)
+	}
+	return out, total, rows.Err()
+}
+
 // BackfillRegistrationEvents inserts a registration_events row with
 // source='backfill' for every existing users/accounts row that is not yet
 // tracked. Idempotent: uses WHERE NOT EXISTS guards.
