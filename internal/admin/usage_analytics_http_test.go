@@ -62,13 +62,13 @@ func seedUsageFixtureHTTP(t *testing.T, s *store.Store) usageFixture {
 	t0 := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Hour)
 
 	type row struct {
-		keyID          int64
-		model          string
-		prompt, comp   int
-		dur            int64
-		credit         float64
-		status         string
-		offset         time.Duration
+		keyID        int64
+		model        string
+		prompt, comp int
+		dur          int64
+		credit       float64
+		status       string
+		offset       time.Duration
 	}
 	rows := []row{
 		{keyUser, "llama3.1:8b", 100, 50, 200, 0.30, "completed", 0},
