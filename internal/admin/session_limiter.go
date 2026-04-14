@@ -26,9 +26,13 @@ type sessionBucket struct {
 
 // sessionLimiter manages one token bucket per active admin session,
 // keyed by the session's token hash. 300 req/min (5 tokens/sec refill).
+//
+// nowFn is the clock source (injected for deterministic tests); nil
+// means wall clock.
 type sessionLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*sessionBucket
+	nowFn   func() time.Time
 }
 
 func newSessionLimiter() *sessionLimiter {
@@ -43,8 +47,16 @@ func newSessionLimiter() *sessionLimiter {
 	return limiter
 }
 
+func (l *sessionLimiter) now() time.Time {
+	if l.nowFn != nil {
+		return l.nowFn()
+	}
+	return time.Now()
+}
+
 // Allow consumes one token for the given session hash. The bucket is
-// created on first use and refilled based on wall-clock elapsed time.
+// created on first use and refilled based on elapsed time from the
+// limiter's clock.
 func (l *sessionLimiter) Allow(tokenHash string) bool {
 	const (
 		capacity   = float64(PerSessionRateLimit)
@@ -54,7 +66,7 @@ func (l *sessionLimiter) Allow(tokenHash string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	now := time.Now()
+	now := l.now()
 	bucket, exists := l.buckets[tokenHash]
 	if !exists {
 		l.buckets[tokenHash] = &sessionBucket{
@@ -80,7 +92,7 @@ func (l *sessionLimiter) Allow(tokenHash string) bool {
 func (l *sessionLimiter) prune() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	cutoff := time.Now().Add(-sessionIdleCutoff)
+	cutoff := l.now().Add(-sessionIdleCutoff)
 	for hash, b := range l.buckets {
 		if b.lastAccess.Before(cutoff) {
 			delete(l.buckets, hash)

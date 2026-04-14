@@ -153,28 +153,51 @@ func TestAdmin_BothHeaders_XAdminKeyWins(t *testing.T) {
 	}
 }
 
-func TestAdmin_Bearer_PerSessionRateLimit(t *testing.T) {
-	h, s := setupAdminTest(t)
+// TestSessionLimiter_PerSessionCap drives the limiter through its full
+// capacity + refill cycle against a fake clock. The previous HTTP
+// integration version of this test was flaky: it burst PerSessionRateLimit
+// requests and asserted the next one was rejected, but the 5 tok/sec
+// wall-clock refill meant a slow CI loop could accrue enough tokens to
+// let subsequent requests slip through. This version freezes the clock
+// so the assertion is exact.
+func TestSessionLimiter_PerSessionCap(t *testing.T) {
+	t0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := t0
+	lim := &sessionLimiter{
+		buckets: make(map[string]*sessionBucket),
+		nowFn:   func() time.Time { return clock },
+	}
+	const key = "session-cap"
 
-	token := createSession(t, s, "ratelimit-admin@example.com", "admin", time.Hour, true)
-
-	// Per-session bucket is 300/min with a 5 tok/sec refill. Burst past the
-	// capacity and assert we see a 429 within a margin that tolerates the
-	// wall-clock refill that accumulates while the loop runs.
-	const maxAttempts = PerSessionRateLimit + 50
-	sawLimit := false
-	for i := 0; i < maxAttempts; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code == http.StatusTooManyRequests {
-			sawLimit = true
-			break
+	for i := 0; i < PerSessionRateLimit; i++ {
+		if !lim.Allow(key) {
+			t.Fatalf("request %d/%d should be allowed on a fresh bucket", i+1, PerSessionRateLimit)
 		}
 	}
-	if !sawLimit {
-		t.Errorf("expected 429 within %d requests, never rate-limited", maxAttempts)
+	if lim.Allow(key) {
+		t.Fatal("expected bucket to be exhausted after PerSessionRateLimit requests")
+	}
+
+	// Advance 12s → 60 tokens refilled (5 tok/sec). Exactly 60 must pass.
+	clock = t0.Add(12 * time.Second)
+	for i := 0; i < 60; i++ {
+		if !lim.Allow(key) {
+			t.Fatalf("after 12s refill, request %d/60 should be allowed", i+1)
+		}
+	}
+	if lim.Allow(key) {
+		t.Fatal("refilled tokens should be exhausted after 60 requests")
+	}
+
+	// Advance well past capacity-in-seconds → refill caps at PerSessionRateLimit.
+	clock = t0.Add(1 * time.Hour)
+	for i := 0; i < PerSessionRateLimit; i++ {
+		if !lim.Allow(key) {
+			t.Fatalf("after long refill (capped), request %d/%d should be allowed", i+1, PerSessionRateLimit)
+		}
+	}
+	if lim.Allow(key) {
+		t.Fatal("refill must cap at PerSessionRateLimit, not overflow")
 	}
 }
 
