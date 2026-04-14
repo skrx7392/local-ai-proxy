@@ -164,6 +164,7 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 			}
 			if !h.adminAllow() {
 				w.Header().Set("Retry-After", "6")
+				h.metrics.RecordRateLimitReject()
 				proxy.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Admin rate limit exceeded")
 				return
 			}
@@ -221,6 +222,7 @@ func (h *handler) authMiddleware(next http.Handler) http.Handler {
 		}
 		if !h.sessionLimiter.Allow(tokenHash) {
 			w.Header().Set("Retry-After", "1")
+			h.metrics.RecordRateLimitReject()
 			proxy.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Admin rate limit exceeded")
 			return
 		}

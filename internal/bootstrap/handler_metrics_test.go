@@ -61,6 +61,44 @@ func TestBootstrap_Success_IncrementsRegistrationCounter(t *testing.T) {
 	}
 }
 
+func TestBootstrap_RateLimit429_IncrementsRateLimitReject(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	s, err := store.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	m := metrics.New(func() int { return 0 })
+	h := New(s, testBootstrapToken, m)
+
+	// Bootstrap bucket is 5 req/min — fire more to force 429s. Use wrong
+	// token so successful inserts don't pile up; the rate limiter gates
+	// before token check.
+	badBody, _ := json.Marshal(bootstrapRequest{
+		Token: "wrong", Email: "x@y.com", Password: "strongpass123", Name: "X",
+	})
+	var hit429 int
+	for i := 0; i < 8; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/bootstrap", bytes.NewReader(badBody))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			hit429++
+		}
+	}
+	if hit429 == 0 {
+		t.Fatal("expected at least one 429 after burning bootstrap bucket")
+	}
+	if got := testutil.ToFloat64(m.RateLimitRejects); got != float64(hit429) {
+		t.Errorf("ratelimit_rejects = %v, want %d", got, hit429)
+	}
+}
+
 func TestBootstrap_InvalidToken_DoesNotIncrement(t *testing.T) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {

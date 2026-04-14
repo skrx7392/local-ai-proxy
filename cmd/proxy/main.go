@@ -47,6 +47,8 @@ func (p poolStatProvider) Stat() appmetrics.PoolStat {
 		LifetimeDestroys: s.MaxLifetimeDestroyCount(),
 		IdleDestroys:     s.MaxIdleDestroyCount(),
 		EmptyAcquires:    s.EmptyAcquireCount(),
+		CanceledAcquires: s.CanceledAcquireCount(),
+		EmptyAcquireWait: s.EmptyAcquireWaitTime(),
 	}
 }
 

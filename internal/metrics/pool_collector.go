@@ -9,17 +9,19 @@ import (
 // PoolStat is a provider-agnostic snapshot of pgxpool.Stat. Decouples the
 // metrics package from jackc/pgx so tests can inject arbitrary values.
 type PoolStat struct {
-	Total            int32
-	Acquired         int32
-	Idle             int32
-	Max              int32
-	Constructing     int32
-	AcquireCount     int64
-	AcquireDuration  time.Duration
-	NewConns         int64
-	LifetimeDestroys int64
-	IdleDestroys     int64
-	EmptyAcquires    int64
+	Total             int32
+	Acquired          int32
+	Idle              int32
+	Max               int32
+	Constructing      int32
+	AcquireCount      int64
+	AcquireDuration   time.Duration
+	NewConns          int64
+	LifetimeDestroys  int64
+	IdleDestroys      int64
+	EmptyAcquires     int64
+	CanceledAcquires  int64
+	EmptyAcquireWait  time.Duration
 }
 
 // PoolStatProvider yields a PoolStat snapshot on demand. Implementations must
@@ -42,6 +44,8 @@ type poolCollector struct {
 	lifetimeDestroys  *prometheus.Desc
 	idleDestroys      *prometheus.Desc
 	emptyAcquires     *prometheus.Desc
+	canceledAcquires  *prometheus.Desc
+	emptyAcquireWait  *prometheus.Desc
 }
 
 func newPoolCollector(provider PoolStatProvider) *poolCollector {
@@ -102,6 +106,16 @@ func newPoolCollector(provider PoolStatProvider) *poolCollector {
 			"Cumulative acquires that had to wait for an available connection.",
 			nil, nil,
 		),
+		canceledAcquires: prometheus.NewDesc(
+			"aiproxy_db_pool_canceled_acquires_total",
+			"Cumulative acquires canceled via context before a connection was available.",
+			nil, nil,
+		),
+		emptyAcquireWait: prometheus.NewDesc(
+			"aiproxy_db_pool_empty_acquire_wait_seconds_total",
+			"Cumulative time spent waiting when no connection was available, in seconds.",
+			nil, nil,
+		),
 	}
 }
 
@@ -117,6 +131,8 @@ func (c *poolCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.lifetimeDestroys
 	ch <- c.idleDestroys
 	ch <- c.emptyAcquires
+	ch <- c.canceledAcquires
+	ch <- c.emptyAcquireWait
 }
 
 func (c *poolCollector) Collect(ch chan<- prometheus.Metric) {
@@ -135,4 +151,6 @@ func (c *poolCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.lifetimeDestroys, prometheus.CounterValue, float64(s.LifetimeDestroys))
 	ch <- prometheus.MustNewConstMetric(c.idleDestroys, prometheus.CounterValue, float64(s.IdleDestroys))
 	ch <- prometheus.MustNewConstMetric(c.emptyAcquires, prometheus.CounterValue, float64(s.EmptyAcquires))
+	ch <- prometheus.MustNewConstMetric(c.canceledAcquires, prometheus.CounterValue, float64(s.CanceledAcquires))
+	ch <- prometheus.MustNewConstMetric(c.emptyAcquireWait, prometheus.CounterValue, s.EmptyAcquireWait.Seconds())
 }

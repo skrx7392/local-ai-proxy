@@ -77,6 +77,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if !h.allow() {
 		w.Header().Set("Retry-After", "12")
+		h.metrics.RecordRateLimitReject()
 		apierror.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", "Bootstrap rate limit exceeded")
 		slog.InfoContext(r.Context(), "admin bootstrap attempt", "outcome", "rate_limited")
 		return

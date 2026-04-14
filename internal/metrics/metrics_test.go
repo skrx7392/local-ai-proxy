@@ -257,6 +257,7 @@ func TestPoolCollector_EmitsAllMetrics(t *testing.T) {
 			Total: 5, Acquired: 2, Idle: 3, Max: 10, Constructing: 1,
 			AcquireCount: 42, AcquireDuration: 500 * time.Millisecond,
 			NewConns: 6, LifetimeDestroys: 1, IdleDestroys: 2, EmptyAcquires: 3,
+			CanceledAcquires: 4, EmptyAcquireWait: 250 * time.Millisecond,
 		},
 	})
 
@@ -280,6 +281,8 @@ func TestPoolCollector_EmitsAllMetrics(t *testing.T) {
 		"aiproxy_db_pool_lifetime_destroys_total 1",
 		"aiproxy_db_pool_idle_destroys_total 2",
 		"aiproxy_db_pool_empty_acquires_total 3",
+		"aiproxy_db_pool_canceled_acquires_total 4",
+		"aiproxy_db_pool_empty_acquire_wait_seconds_total 0.25",
 	}
 	for _, line := range wantLines {
 		if !strings.Contains(text, line) {
