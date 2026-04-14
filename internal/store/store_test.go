@@ -23,6 +23,7 @@ func setupTestStore(t *testing.T) *Store {
 	wipe := func() {
 		c := context.Background()
 		// FK-aware order: delete referencing rows before referenced rows.
+		// DELETE (not DROP) avoids pg_catalog races on rapid DROP+CREATE cycles.
 		_, _ = s.pool.Exec(c, "DELETE FROM registration_events")
 		_, _ = s.pool.Exec(c, "DELETE FROM credit_holds")
 		_, _ = s.pool.Exec(c, "DELETE FROM credit_transactions")

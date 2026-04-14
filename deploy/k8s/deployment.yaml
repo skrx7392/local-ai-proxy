@@ -40,6 +40,12 @@ spec:
                 secretKeyRef:
                   name: proxy-secret
                   key: ADMIN_KEY
+            - name: ADMIN_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: proxy-secret
+                  key: ADMIN_BOOTSTRAP_TOKEN
+                  optional: true
             - name: LOG_LEVEL
               value: "info"
           livenessProbe:

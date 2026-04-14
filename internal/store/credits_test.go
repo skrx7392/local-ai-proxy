@@ -227,7 +227,7 @@ func TestSettleHold(t *testing.T) {
 	holdID, _ := s.ReserveCredits(accID, 30)
 
 	// Actual cost was 20 (less than reserved 30)
-	if err := s.SettleHold(holdID, 20); err != nil {
+	if _, err := s.SettleHold(holdID, 20); err != nil {
 		t.Fatalf("SettleHold: %v", err)
 	}
 
@@ -266,7 +266,7 @@ func TestSettleHold_AfterSweeperReleased(t *testing.T) {
 	_ = s.ReleaseHold(holdID)
 
 	// Settle after release should be a no-op (not error)
-	if err := s.SettleHold(holdID, 20); err != nil {
+	if _, err := s.SettleHold(holdID, 20); err != nil {
 		t.Fatalf("SettleHold after release should be no-op, got: %v", err)
 	}
 
@@ -420,7 +420,7 @@ func TestCleanupSettledHolds(t *testing.T) {
 	_ = s.AddCredits(accID, 100, "grant")
 
 	holdID, _ := s.ReserveCredits(accID, 10)
-	_ = s.SettleHold(holdID, 5)
+	_, _ = s.SettleHold(holdID, 5)
 
 	// Backdate the settled_at
 	_, _ = s.pool.Exec(

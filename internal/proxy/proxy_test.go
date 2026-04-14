@@ -717,7 +717,7 @@ func TestLogUsage_NilKey(t *testing.T) {
 	h := &handler{usageCh: usageCh}
 
 	// Should not panic and should not send to channel
-	h.logUsage(nil, usageData{Model: "test"}, time.Second, "completed")
+	h.logUsage(nil, usageData{Model: "test"}, time.Second, "completed", 0)
 
 	select {
 	case entry := <-usageCh:
@@ -736,7 +736,7 @@ func TestLogUsage_ChannelFull(t *testing.T) {
 	key := testAPIKey()
 
 	// Should not block — entry is dropped silently
-	h.logUsage(key, usageData{Model: "test"}, time.Second, "completed")
+	h.logUsage(key, usageData{Model: "test"}, time.Second, "completed", 0)
 
 	// Drain the original entry
 	<-usageCh
@@ -760,7 +760,7 @@ func TestLogUsage_Success(t *testing.T) {
 	ud.Usage.CompletionTokens = 5
 	ud.Usage.TotalTokens = 15
 
-	h.logUsage(key, ud, 500*time.Millisecond, "completed")
+	h.logUsage(key, ud, 500*time.Millisecond, "completed", 0.12)
 
 	select {
 	case entry := <-usageCh:
@@ -784,6 +784,9 @@ func TestLogUsage_Success(t *testing.T) {
 		}
 		if entry.Status != "completed" {
 			t.Errorf("expected status 'completed', got %q", entry.Status)
+		}
+		if diff := entry.CreditsCharged - 0.12; diff < -0.0001 || diff > 0.0001 {
+			t.Errorf("expected credits_charged=0.12, got %f", entry.CreditsCharged)
 		}
 	case <-time.After(time.Second):
 		t.Error("timed out waiting for usage entry")
@@ -1063,6 +1066,59 @@ func TestCreditIntegration_SettlesAfterResponse(t *testing.T) {
 	}
 	if bal.Reserved != 0 {
 		t.Errorf("expected reserved 0 after settlement, got %f", bal.Reserved)
+	}
+
+	// The proxy must forward the settled cost to the async usage writer so
+	// the column `usage_logs.credits_charged` ends up non-zero.
+	select {
+	case entry := <-usageCh:
+		if entry.CreditsCharged <= 0 {
+			t.Errorf("expected CreditsCharged > 0 after successful settlement, got %f", entry.CreditsCharged)
+		}
+		// Cost must match balance delta.
+		cost := 1000 - bal.Balance
+		if diff := entry.CreditsCharged - cost; diff < -0.0001 || diff > 0.0001 {
+			t.Errorf("expected CreditsCharged=%f to match balance delta, got %f", cost, entry.CreditsCharged)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for usage entry after settlement")
+	}
+}
+
+func TestCreditIntegration_LegacyKeyLogsZeroCredits(t *testing.T) {
+	db := setupTestDB(t)
+
+	ollamaResp := map[string]any{
+		"id": "chatcmpl-legacy", "object": "chat.completion", "model": "llama3.1:8b",
+		"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "Hi"}}},
+		"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+	}
+	upstream := mockOllamaChatNonStreaming(http.StatusOK, ollamaResp)
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(mustParseURL(t, upstream.URL), usageCh, 52428800, db, nil)
+
+	reqBody := `{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	// Legacy admin key: no AccountID, so credit plumbing is bypassed.
+	key := &store.APIKey{ID: 1, Name: "legacy"}
+	req = addKeyToRequest(req, key)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+
+	select {
+	case entry := <-usageCh:
+		if entry.CreditsCharged != 0 {
+			t.Errorf("expected CreditsCharged=0 for legacy key, got %f", entry.CreditsCharged)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for usage entry")
 	}
 }
 

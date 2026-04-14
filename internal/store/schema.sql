@@ -172,3 +172,18 @@ CREATE TABLE IF NOT EXISTS registration_events (
 );
 CREATE INDEX IF NOT EXISTS idx_registration_events_created
     ON registration_events(created_at);
+
+-- Analytics indexes (PR 1)
+CREATE INDEX IF NOT EXISTS idx_usage_logs_model_created
+    ON usage_logs(model, created_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_account_id
+    ON api_keys(account_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user_id
+    ON api_keys(user_id);
+
+-- Per-request credit cost on usage_logs (historical rows default 0).
+DO $$ BEGIN
+    ALTER TABLE usage_logs ADD COLUMN credits_charged DECIMAL(15,6) NOT NULL DEFAULT 0;
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;

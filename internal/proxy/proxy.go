@@ -228,13 +228,13 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 		}
 		if ctx.Err() != nil {
 			if key != nil {
-				h.logUsage(key, usageData{Model: model}, time.Since(start), "partial")
+				h.logUsage(key, usageData{Model: model}, time.Since(start), "partial", 0)
 			}
 			return
 		}
 		slog.ErrorContext(ctx, "upstream error", "error", err, "model", model)
 		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
+			h.logUsage(key, usageData{Model: model}, time.Since(start), "error", 0)
 		}
 		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
 		return
@@ -249,7 +249,7 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 		}
 		slog.ErrorContext(ctx, "read response error", "error", err, "model", model)
 		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
+			h.logUsage(key, usageData{Model: model}, time.Since(start), "error", 0)
 		}
 		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to read upstream response")
 		return
@@ -266,18 +266,19 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 	}
 
 	// Credit settlement
+	var actualCost float64
 	if creditEnabled {
 		if resp.StatusCode != http.StatusOK {
 			// Upstream error — release hold, no charge
 			h.db.ReleaseHold(holdID)
 		} else {
-			h.settleCredits(holdID, key, &ud, len(respBody), pricing)
+			actualCost = h.settleCredits(holdID, key, &ud, len(respBody), pricing)
 		}
 	}
 
 	// Log usage and record metrics
 	if key != nil {
-		h.logUsage(key, ud, time.Since(start), status)
+		h.logUsage(key, ud, time.Since(start), status, actualCost)
 	}
 	h.metrics.RecordTokens(model, ud.Usage.PromptTokens, ud.Usage.CompletionTokens)
 
@@ -325,13 +326,13 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 		}
 		if ctx.Err() != nil {
 			if key != nil {
-				h.logUsage(key, usageData{Model: model}, time.Since(start), "partial")
+				h.logUsage(key, usageData{Model: model}, time.Since(start), "partial", 0)
 			}
 			return
 		}
 		slog.ErrorContext(ctx, "upstream error", "error", err, "model", model, "stream", true)
 		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
+			h.logUsage(key, usageData{Model: model}, time.Since(start), "error", 0)
 		}
 		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
 		return
@@ -353,7 +354,7 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 			h.db.ReleaseHold(holdID)
 		}
 		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error")
+			h.logUsage(key, usageData{Model: model}, time.Since(start), "error", 0)
 		}
 		return
 	}
@@ -407,19 +408,22 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 	}
 
 	// Credit settlement
+	var actualCost float64
 	if creditEnabled {
-		h.settleStreamCredits(holdID, key, &ud, bytesWritten, status, pricing)
+		actualCost = h.settleStreamCredits(holdID, key, &ud, bytesWritten, status, pricing)
 	}
 
 	if key != nil {
-		h.logUsage(key, ud, time.Since(start), status)
+		h.logUsage(key, ud, time.Since(start), status, actualCost)
 	}
 	h.metrics.RecordTokens(model, ud.Usage.PromptTokens, ud.Usage.CompletionTokens)
 }
 
-// settleCredits handles credit settlement for non-streaming responses.
-// Called only for successful (200) upstream responses.
-func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, respBodyLen int, pricing *store.CreditPricing) {
+// settleCredits handles credit settlement for non-streaming responses and
+// returns the amount actually charged (0 when the hold had already been
+// released by the sweeper). Called only for successful (200) upstream
+// responses.
+func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, respBodyLen int, pricing *store.CreditPricing) float64 {
 	promptTokens := ud.Usage.PromptTokens
 	completionTokens := ud.Usage.CompletionTokens
 
@@ -429,8 +433,9 @@ func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, 
 		promptTokens = 0 // prompt cost was in the reserve estimate
 	}
 
-	actualCost := credits.EstimateCost(pricing, promptTokens, completionTokens)
-	if err := h.db.SettleHold(holdID, actualCost); err != nil {
+	estimatedCost := credits.EstimateCost(pricing, promptTokens, completionTokens)
+	charged, err := h.db.SettleHold(holdID, estimatedCost)
+	if err != nil {
 		slog.Error("settle hold error", "error", err, "hold_id", holdID)
 	}
 
@@ -440,13 +445,15 @@ func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, 
 			slog.Warn("update usage stats error", "error", err, "account_id", *key.AccountID, "model", ud.Model)
 		}
 	}
+	return charged
 }
 
-// settleStreamCredits handles credit settlement for streaming responses.
-func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usageData, bytesWritten int, status string, pricing *store.CreditPricing) {
+// settleStreamCredits handles credit settlement for streaming responses and
+// returns the amount actually charged.
+func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usageData, bytesWritten int, status string, pricing *store.CreditPricing) float64 {
 	if status == "error" && bytesWritten == 0 {
 		h.db.ReleaseHold(holdID)
-		return
+		return 0
 	}
 
 	promptTokens := ud.Usage.PromptTokens
@@ -458,8 +465,9 @@ func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usage
 		promptTokens = 0
 	}
 
-	actualCost := credits.EstimateCost(pricing, promptTokens, completionTokens)
-	if err := h.db.SettleHold(holdID, actualCost); err != nil {
+	estimatedCost := credits.EstimateCost(pricing, promptTokens, completionTokens)
+	charged, err := h.db.SettleHold(holdID, estimatedCost)
+	if err != nil {
 		slog.Error("settle hold error", "error", err, "hold_id", holdID, "stream", true)
 	}
 
@@ -468,9 +476,10 @@ func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usage
 			slog.Warn("update usage stats error", "error", err, "account_id", *key.AccountID, "model", ud.Model)
 		}
 	}
+	return charged
 }
 
-func (h *handler) logUsage(key *store.APIKey, ud usageData, duration time.Duration, status string) {
+func (h *handler) logUsage(key *store.APIKey, ud usageData, duration time.Duration, status string, creditsCharged float64) {
 	if key == nil {
 		return
 	}
@@ -482,6 +491,7 @@ func (h *handler) logUsage(key *store.APIKey, ud usageData, duration time.Durati
 		TotalTokens:      ud.Usage.TotalTokens,
 		DurationMs:       duration.Milliseconds(),
 		Status:           status,
+		CreditsCharged:   creditsCharged,
 	}
 	select {
 	case h.usageCh <- entry:

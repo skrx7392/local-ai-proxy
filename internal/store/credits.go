@@ -143,13 +143,15 @@ func (s *Store) ReserveCredits(accountID int64, amount float64) (int64, error) {
 	return holdID, nil
 }
 
-// SettleHold settles a credit hold with the actual cost. Derives reserve amount from the hold row.
-// If the hold was already released by the sweeper, returns nil (no-op).
-func (s *Store) SettleHold(holdID int64, actualAmount float64) error {
+// SettleHold settles a credit hold with the actual cost and returns the cost
+// that was actually charged. When the hold was already released by the
+// sweeper, returns (0, nil) so callers can record "no cost charged" without
+// special-casing. Normal path returns (actualAmount, nil).
+func (s *Store) SettleHold(holdID int64, actualAmount float64) (float64, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -162,11 +164,11 @@ func (s *Store) SettleHold(holdID int64, actualAmount float64) error {
 		 RETURNING account_id, amount`, holdID,
 	).Scan(&accountID, &holdAmount)
 	if err == pgx.ErrNoRows {
-		// Sweeper already released this hold — no-op
-		return nil
+		// Sweeper already released this hold — nothing charged.
+		return 0, nil
 	}
 	if err != nil {
-		return fmt.Errorf("update hold: %w", err)
+		return 0, fmt.Errorf("update hold: %w", err)
 	}
 
 	// Update balance: deduct actual cost, release reservation
@@ -178,7 +180,7 @@ func (s *Store) SettleHold(holdID int64, actualAmount float64) error {
 		 RETURNING balance`, actualAmount, holdAmount, accountID,
 	).Scan(&newBalance)
 	if err != nil {
-		return fmt.Errorf("update balance: %w", err)
+		return 0, fmt.Errorf("update balance: %w", err)
 	}
 
 	// Audit trail
@@ -188,10 +190,13 @@ func (s *Store) SettleHold(holdID int64, actualAmount float64) error {
 		accountID, -actualAmount, newBalance, holdID,
 	)
 	if err != nil {
-		return fmt.Errorf("insert transaction: %w", err)
+		return 0, fmt.Errorf("insert transaction: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return actualAmount, nil
 }
 
 // ReleaseHold releases a pending hold without charging. Used when requests fail with 0 bytes.
@@ -458,7 +463,9 @@ func (s *Store) RevokeRegistrationToken(id int64) error {
 }
 
 // RegisterServiceAccount atomically: validates+consumes token, creates service account,
-// inits credit balance, grants credits, creates API key. Returns (accountID, keyID, creditGrant, err).
+// inits credit balance, grants credits, creates API key, and records a
+// registration_events audit row with source='registration_token'.
+// Returns (accountID, keyID, creditGrant, err).
 func (s *Store) RegisterServiceAccount(tokenHash, name, keyHash, keyPrefix string, rateLimit int) (int64, int64, float64, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
@@ -468,14 +475,15 @@ func (s *Store) RegisterServiceAccount(tokenHash, name, keyHash, keyPrefix strin
 	defer tx.Rollback(ctx)
 
 	// Atomically validate and consume the token
+	var tokenID int64
 	var creditGrant float64
 	err = tx.QueryRow(ctx,
 		`UPDATE registration_tokens
 		 SET uses = uses + 1
 		 WHERE token_hash = $1 AND NOT revoked AND uses < max_uses
 		   AND (expires_at IS NULL OR expires_at > NOW())
-		 RETURNING credit_grant`, tokenHash,
-	).Scan(&creditGrant)
+		 RETURNING id, credit_grant`, tokenHash,
+	).Scan(&tokenID, &creditGrant)
 	if err == pgx.ErrNoRows {
 		return 0, 0, 0, fmt.Errorf("invalid, expired, or exhausted registration token")
 	}
@@ -525,6 +533,14 @@ func (s *Store) RegisterServiceAccount(tokenHash, name, keyHash, keyPrefix strin
 	).Scan(&keyID)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("create key: %w", err)
+	}
+
+	if _, err = tx.Exec(ctx,
+		`INSERT INTO registration_events (kind, account_id, registration_token_id, source)
+		 VALUES ('service', $1, $2, 'registration_token')`,
+		accountID, tokenID,
+	); err != nil {
+		return 0, 0, 0, fmt.Errorf("record registration_event: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

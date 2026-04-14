@@ -20,6 +20,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Connect to Tailscale
         uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
@@ -32,12 +34,16 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DEV_SERVER_SSH_KEY }}
           ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          ADMIN_BOOTSTRAP_TOKEN: ${{ secrets.ADMIN_BOOTSTRAP_TOKEN }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
         run: |
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+
+          SHORT_SHA="${IMAGE_TAG:0:12}"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           # Copy source to server and build Docker image there
           scp -o StrictHostKeyChecking=no -r cmd/ internal/ deploy/ go.mod sk@100.108.60.90:~/local-ai-proxy/
@@ -46,27 +52,26 @@ jobs:
           ssh -o StrictHostKeyChecking=no sk@100.108.60.90 "export KUBECONFIG=/home/sk/.kube/config && \
             sudo kubectl -n local-ai create secret generic proxy-secret \
               --from-literal=ADMIN_KEY='${ADMIN_KEY}' \
+              --from-literal=ADMIN_BOOTSTRAP_TOKEN='${ADMIN_BOOTSTRAP_TOKEN}' \
               --from-literal=DATABASE_URL='${DATABASE_URL}' \
               --dry-run=client -o yaml | sudo kubectl apply -f -"
 
-          ssh -o StrictHostKeyChecking=no sk@100.108.60.90 << 'DEPLOY_EOF'
-            export KUBECONFIG=/home/sk/.kube/config
-            cd ~/local-ai-proxy
-
-            # Build Docker image
-            sudo docker build -f deploy/Dockerfile -t local-ai-proxy:latest .
-
-            # Import into k3s containerd
-            sudo docker save local-ai-proxy:latest | sudo k3s ctr images import -
-
-            # Apply k8s manifests
-            sudo kubectl apply -f deploy/k8s/namespace.yaml
-            sudo kubectl apply -f deploy/k8s/pvc.yaml
-            sudo kubectl apply -f deploy/k8s/service.yaml
-            sudo kubectl apply -f deploy/k8s/ingress.yaml
-            sudo kubectl apply -f deploy/k8s/deployment.yaml
-
-            # Restart to pick up new image
-            sudo kubectl -n local-ai rollout restart deployment/ai-proxy
-            sudo kubectl -n local-ai rollout status deployment/ai-proxy --timeout=120s
-          DEPLOY_EOF
+          # Inline the version metadata so the remote shell sees concrete values.
+          ssh -o StrictHostKeyChecking=no sk@100.108.60.90 \
+            "export KUBECONFIG=/home/sk/.kube/config && \
+             cd ~/local-ai-proxy && \
+             sudo docker build \
+               --build-arg GIT_SHA='${SHORT_SHA}' \
+               --build-arg BUILD_TIME='${BUILD_TIME}' \
+               -f deploy/Dockerfile \
+               -t local-ai-proxy:${SHORT_SHA} \
+               -t local-ai-proxy:latest \
+               . && \
+             sudo docker save local-ai-proxy:${SHORT_SHA} local-ai-proxy:latest | sudo k3s ctr images import - && \
+             sudo kubectl apply -f deploy/k8s/namespace.yaml && \
+             sudo kubectl apply -f deploy/k8s/pvc.yaml && \
+             sudo kubectl apply -f deploy/k8s/service.yaml && \
+             sudo kubectl apply -f deploy/k8s/ingress.yaml && \
+             sudo kubectl apply -f deploy/k8s/deployment.yaml && \
+             sudo kubectl -n local-ai set image deployment/ai-proxy ai-proxy=local-ai-proxy:${SHORT_SHA} && \
+             sudo kubectl -n local-ai rollout status deployment/ai-proxy --timeout=120s"

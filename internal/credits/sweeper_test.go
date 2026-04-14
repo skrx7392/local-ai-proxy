@@ -70,7 +70,7 @@ func TestStartSweeper_CleansUpOldHolds(t *testing.T) {
 	_ = db.AddCredits(accID, 1000, "grant")
 
 	holdID, _ := db.ReserveCredits(accID, 10)
-	_ = db.SettleHold(holdID, 5)
+	_, _ = db.SettleHold(holdID, 5)
 
 	// Backdate settled_at
 	pool := db.Pool()
