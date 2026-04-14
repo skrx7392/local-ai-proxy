@@ -250,7 +250,10 @@ func TestAdmin_UpdateKeyRateLimit_CapEnforced(t *testing.T) {
 	}
 }
 
-func TestAdmin_UpdateKeyRateLimit_ZeroAppliesDefault(t *testing.T) {
+func TestAdmin_UpdateKeyRateLimit_RejectsZero(t *testing.T) {
+	// Explicit updates must name a positive integer — unlike createKey, which
+	// treats 0 as "omitted → default 60" for back-compat. See PLAN.md §PR 0
+	// note on PR 3.
 	h, s := setupAdminTest(t)
 	kid, _ := s.CreateKey("zero-key", "hash-zro", "sk-zro", 120)
 
@@ -261,12 +264,32 @@ func TestAdmin_UpdateKeyRateLimit_ZeroAppliesDefault(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for explicit rate_limit=0, got %d: %s", rec.Code, rec.Body.String())
 	}
 	k, _ := s.GetKeyByID(kid)
-	if k.RateLimit != 60 {
-		t.Errorf("expected default rate_limit=60, got %d", k.RateLimit)
+	if k.RateLimit != 120 {
+		t.Errorf("expected rate_limit unchanged=120, got %d", k.RateLimit)
+	}
+}
+
+func TestAdmin_UpdateKeyRateLimit_RejectsNegative(t *testing.T) {
+	h, s := setupAdminTest(t)
+	kid, _ := s.CreateKey("neg-key", "hash-neg", "sk-neg", 90)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/keys/"+strconv.FormatInt(kid, 10)+"/rate-limit",
+		bytes.NewBufferString(`{"rate_limit":-5}`))
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for negative rate_limit, got %d: %s", rec.Code, rec.Body.String())
+	}
+	k, _ := s.GetKeyByID(kid)
+	if k.RateLimit != 90 {
+		t.Errorf("expected rate_limit unchanged=90, got %d", k.RateLimit)
 	}
 }
 
