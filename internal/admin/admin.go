@@ -15,10 +15,16 @@ import (
 	"time"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/health"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
+
+// AdminKeyRateLimitPerMinute is the shared bucket size for X-Admin-Key requests.
+// Exposed so the /admin/config snapshot can report it without duplicating the
+// magic number.
+const AdminKeyRateLimitPerMinute = 10
 
 type handler struct {
 	store    *store.Store
@@ -32,6 +38,21 @@ type handler struct {
 
 	// Bearer session rate limiter: 300 req/min, one bucket per session (keyed by token hash).
 	sessionLimiter *sessionLimiter
+
+	// BE 5: dependencies for /admin/config + /admin/health. Zero values are
+	// safe — getConfig emits zeroed fields, getHealth reports zero uptime
+	// and an empty checks map.
+	configSnapshot ConfigSnapshot
+	healthChecker  *health.Checker
+	startTime      time.Time
+}
+
+// Options carries optional dependencies wired by main. Tests that don't touch
+// /admin/config or /admin/health may pass a zero-value Options.
+type Options struct {
+	Snapshot  ConfigSnapshot
+	Checker   *health.Checker
+	StartTime time.Time
 }
 
 type adminSessionCtxKey struct{}
@@ -65,14 +86,17 @@ type keyResponse struct {
 	Revoked   bool      `json:"revoked"`
 }
 
-func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.UsageEntry) http.Handler {
+func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.UsageEntry, opts Options) http.Handler {
 	handler := &handler{
 		store:             dataStore,
 		adminKey:          adminKey,
 		usageCh:           usageCh,
-		rateLimitTokens:   10,
+		rateLimitTokens:   AdminKeyRateLimitPerMinute,
 		rateLimitLastTime: time.Now(),
 		sessionLimiter:    newSessionLimiter(),
+		configSnapshot:    opts.Snapshot,
+		healthChecker:     opts.Checker,
+		startTime:         opts.StartTime,
 	}
 
 	mux := http.NewServeMux()
@@ -114,6 +138,10 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 
 	// Session limits
 	mux.HandleFunc("PUT /api/admin/keys/{id}/session-limit", handler.setSessionLimit)
+
+	// Config + health (BE 5)
+	mux.HandleFunc("GET /api/admin/config", handler.getConfig)
+	mux.HandleFunc("GET /api/admin/health", handler.getHealth)
 
 	return handler.authMiddleware(mux)
 }
@@ -203,7 +231,7 @@ func (h *handler) adminAllow() bool {
 
 	now := time.Now()
 	elapsed := now.Sub(h.rateLimitLastTime).Seconds()
-	h.rateLimitTokens = min(10, h.rateLimitTokens+elapsed*(10.0/60.0))
+	h.rateLimitTokens = min(float64(AdminKeyRateLimitPerMinute), h.rateLimitTokens+elapsed*(float64(AdminKeyRateLimitPerMinute)/60.0))
 	h.rateLimitLastTime = now
 
 	if h.rateLimitTokens >= 1 {

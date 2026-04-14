@@ -57,7 +57,7 @@ func setupAdminTest(t *testing.T) (http.Handler, *store.Store) {
 	})
 
 	usageCh := make(chan store.UsageEntry, 100)
-	h := NewHandler(s, testAdminKey, usageCh)
+	h := NewHandler(s, testAdminKey, usageCh, Options{})
 	return h, s
 }
 

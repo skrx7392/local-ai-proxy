@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -35,6 +36,11 @@ var (
 	buildTime = "unknown"
 )
 
+// usageChannelCapacity is the buffered size of the async usage-log channel.
+// Reported by /api/admin/config and used as the saturation threshold by both
+// the readiness probe and /api/admin/health.
+const usageChannelCapacity = 1000
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -62,8 +68,10 @@ func main() {
 	}
 	defer db.Close()
 
+	startTime := time.Now()
+
 	// Async usage logging channel
-	usageCh := make(chan store.UsageEntry, 1000)
+	usageCh := make(chan store.UsageEntry, usageChannelCapacity)
 
 	// Start async usage writer
 	writerCtx, writerCancel := context.WithCancel(context.Background())
@@ -137,12 +145,33 @@ func main() {
 	creditGate := credits.CreditGate(db, m)
 	rateLimitMiddleware := ratelimit.Middleware(limiter, m)
 	cors := middleware.CORS(cfg.CORSOrigins)
-	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh)
-	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken)
-	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant)
 
 	hc := health.NewChecker(db, cfg.OllamaURL, func() int { return len(usageCh) }, cap(usageCh))
 	hc.SetOllamaGauge(m.OllamaUp)
+
+	configSnapshot := admin.ConfigSnapshot{
+		OllamaURL:               cfg.OllamaURL,
+		Port:                    cfg.Port,
+		LogLevel:                cfg.LogLevel,
+		MaxRequestBodyBytes:     cfg.MaxRequestBody,
+		DefaultCreditGrant:      cfg.DefaultCreditGrant,
+		CORSOrigins:             cfg.CORSOrigins,
+		AdminRateLimitPerMinute: admin.AdminKeyRateLimitPerMinute,
+		UsageChannelCapacity:    usageChannelCapacity,
+		AdminSessionDurationHrs: int(user.AdminSessionDuration / time.Hour),
+		UserSessionDurationHrs:  int(user.UserSessionDuration / time.Hour),
+		Version:                 version,
+		BuildTime:               buildTime,
+		GoVersion:               runtime.Version(),
+	}
+
+	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh, admin.Options{
+		Snapshot:  configSnapshot,
+		Checker:   hc,
+		StartTime: startTime,
+	})
+	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken)
+	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant)
 
 	mux := http.NewServeMux()
 
