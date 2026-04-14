@@ -12,8 +12,8 @@ import (
 // Sweeper operation labels. Kept in sync with the bounded label set on
 // aiproxy_credit_sweeper_runs_total / aiproxy_credit_sweeper_swept_total.
 const (
-	opStaleHolds      = "stale_holds"
-	opSettledCleanup  = "settled_cleanup"
+	opStaleHolds     = "stale_holds"
+	opSettledCleanup = "settled_cleanup"
 )
 
 // StartSweeper launches two background goroutines:

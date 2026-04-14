@@ -9,19 +9,19 @@ import (
 // PoolStat is a provider-agnostic snapshot of pgxpool.Stat. Decouples the
 // metrics package from jackc/pgx so tests can inject arbitrary values.
 type PoolStat struct {
-	Total             int32
-	Acquired          int32
-	Idle              int32
-	Max               int32
-	Constructing      int32
-	AcquireCount      int64
-	AcquireDuration   time.Duration
-	NewConns          int64
-	LifetimeDestroys  int64
-	IdleDestroys      int64
-	EmptyAcquires     int64
-	CanceledAcquires  int64
-	EmptyAcquireWait  time.Duration
+	Total            int32
+	Acquired         int32
+	Idle             int32
+	Max              int32
+	Constructing     int32
+	AcquireCount     int64
+	AcquireDuration  time.Duration
+	NewConns         int64
+	LifetimeDestroys int64
+	IdleDestroys     int64
+	EmptyAcquires    int64
+	CanceledAcquires int64
+	EmptyAcquireWait time.Duration
 }
 
 // PoolStatProvider yields a PoolStat snapshot on demand. Implementations must
