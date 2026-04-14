@@ -260,6 +260,22 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) listKeys(w http.ResponseWriter, r *http.Request) {
+	envelope, ecode, emsg, eerr := wantEnvelope(r)
+	if eerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, ecode, "invalid_request_error", emsg)
+		return
+	}
+	isActive, acode, amsg, aerr := parseIsActiveFilter(r)
+	if aerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, acode, "invalid_request_error", amsg)
+		return
+	}
+	limit, offset, pcode, pmsg, perr := parsePagination(r)
+	if perr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, pcode, "invalid_request_error", pmsg)
+		return
+	}
+
 	keys, err := h.store.ListKeys()
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list keys error", "error", err)
@@ -267,16 +283,27 @@ func (h *handler) listKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := make([]keyResponse, len(keys))
-	for i, apiKey := range keys {
-		resp[i] = keyResponse{
+	// is_active on keys maps to the inverse of Revoked: an active key is one
+	// that hasn't been revoked. No dedicated "enabled" column exists.
+	resp := make([]keyResponse, 0, len(keys))
+	for _, apiKey := range keys {
+		if isActive != nil && *isActive == apiKey.Revoked {
+			continue
+		}
+		resp = append(resp, keyResponse{
 			ID:        apiKey.ID,
 			Name:      apiKey.Name,
 			KeyPrefix: apiKey.KeyPrefix,
 			RateLimit: apiKey.RateLimit,
 			CreatedAt: apiKey.CreatedAt,
 			Revoked:   apiKey.Revoked,
-		}
+		})
+	}
+
+	if envelope {
+		page, pag := sliceWindow(resp, limit, offset)
+		writeEnvelope(w, page, pag)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -306,6 +333,17 @@ func (h *handler) revokeKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
+	envelope, ecode, emsg, eerr := wantEnvelope(r)
+	if eerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, ecode, "invalid_request_error", emsg)
+		return
+	}
+	limit, offset, pcode, pmsg, perr := parsePagination(r)
+	if perr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, pcode, "invalid_request_error", pmsg)
+		return
+	}
+
 	var keyID *int64
 	var since *time.Time
 
@@ -338,11 +376,38 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if envelope {
+		page, pag := sliceWindow(stats, limit, offset)
+		writeEnvelope(w, page, pag)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
 }
 
 func (h *handler) listUsers(w http.ResponseWriter, r *http.Request) {
+	envelope, ecode, emsg, eerr := wantEnvelope(r)
+	if eerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, ecode, "invalid_request_error", emsg)
+		return
+	}
+	role, rcode, rmsg, rerr := parseRoleFilter(r)
+	if rerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, rcode, "invalid_request_error", rmsg)
+		return
+	}
+	isActive, acode, amsg, aerr := parseIsActiveFilter(r)
+	if aerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, acode, "invalid_request_error", amsg)
+		return
+	}
+	limit, offset, pcode, pmsg, perr := parsePagination(r)
+	if perr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, pcode, "invalid_request_error", pmsg)
+		return
+	}
+
 	users, err := h.store.ListUsers()
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list users error", "error", err)
@@ -359,16 +424,28 @@ func (h *handler) listUsers(w http.ResponseWriter, r *http.Request) {
 		CreatedAt string `json:"created_at"`
 	}
 
-	resp := make([]userResponse, len(users))
-	for i, u := range users {
-		resp[i] = userResponse{
+	resp := make([]userResponse, 0, len(users))
+	for _, u := range users {
+		if role != "" && u.Role != role {
+			continue
+		}
+		if isActive != nil && u.IsActive != *isActive {
+			continue
+		}
+		resp = append(resp, userResponse{
 			ID:        u.ID,
 			Email:     u.Email,
 			Name:      u.Name,
 			Role:      u.Role,
 			IsActive:  u.IsActive,
 			CreatedAt: u.CreatedAt.Format(time.RFC3339),
-		}
+		})
+	}
+
+	if envelope {
+		page, pag := sliceWindow(resp, limit, offset)
+		writeEnvelope(w, page, pag)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -427,6 +504,27 @@ func (h *handler) deactivateUser(w http.ResponseWriter, r *http.Request) {
 // --- Credit management ---
 
 func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
+	envelope, ecode, emsg, eerr := wantEnvelope(r)
+	if eerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, ecode, "invalid_request_error", emsg)
+		return
+	}
+	accType, tcode, tmsg, terr := parseAccountTypeFilter(r)
+	if terr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, tcode, "invalid_request_error", tmsg)
+		return
+	}
+	isActive, acode, amsg, aerr := parseIsActiveFilter(r)
+	if aerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, acode, "invalid_request_error", amsg)
+		return
+	}
+	limit, offset, pcode, pmsg, perr := parsePagination(r)
+	if perr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, pcode, "invalid_request_error", pmsg)
+		return
+	}
+
 	accounts, err := h.store.ListAccountsWithBalances()
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list accounts error", "error", err)
@@ -445,9 +543,15 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		CreatedAt string  `json:"created_at"`
 	}
 
-	resp := make([]accountResponse, len(accounts))
-	for i, a := range accounts {
-		resp[i] = accountResponse{
+	resp := make([]accountResponse, 0, len(accounts))
+	for _, a := range accounts {
+		if accType != "" && a.Type != accType {
+			continue
+		}
+		if isActive != nil && a.IsActive != *isActive {
+			continue
+		}
+		resp = append(resp, accountResponse{
 			ID:        a.ID,
 			Name:      a.Name,
 			Type:      a.Type,
@@ -456,7 +560,13 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 			Reserved:  a.Reserved,
 			Available: a.Balance - a.Reserved,
 			CreatedAt: a.CreatedAt.Format(time.RFC3339),
-		}
+		})
+	}
+
+	if envelope {
+		page, pag := sliceWindow(resp, limit, offset)
+		writeEnvelope(w, page, pag)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -609,6 +719,22 @@ func (h *handler) createRegistrationToken(w http.ResponseWriter, r *http.Request
 }
 
 func (h *handler) listRegistrationTokens(w http.ResponseWriter, r *http.Request) {
+	envelope, ecode, emsg, eerr := wantEnvelope(r)
+	if eerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, ecode, "invalid_request_error", emsg)
+		return
+	}
+	isActive, acode, amsg, aerr := parseIsActiveFilter(r)
+	if aerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, acode, "invalid_request_error", amsg)
+		return
+	}
+	limit, offset, pcode, pmsg, perr := parsePagination(r)
+	if perr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, pcode, "invalid_request_error", pmsg)
+		return
+	}
+
 	tokens, err := h.store.ListRegistrationTokens()
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list registration tokens error", "error", err)
@@ -627,8 +753,12 @@ func (h *handler) listRegistrationTokens(w http.ResponseWriter, r *http.Request)
 		Revoked     bool    `json:"revoked"`
 	}
 
-	resp := make([]tokenResponse, len(tokens))
-	for i, t := range tokens {
+	// is_active on registration tokens maps to the inverse of Revoked.
+	resp := make([]tokenResponse, 0, len(tokens))
+	for _, t := range tokens {
+		if isActive != nil && *isActive == t.Revoked {
+			continue
+		}
 		tr := tokenResponse{
 			ID:          t.ID,
 			Name:        t.Name,
@@ -642,7 +772,13 @@ func (h *handler) listRegistrationTokens(w http.ResponseWriter, r *http.Request)
 			s := t.ExpiresAt.Format(time.RFC3339)
 			tr.ExpiresAt = &s
 		}
-		resp[i] = tr
+		resp = append(resp, tr)
+	}
+
+	if envelope {
+		page, pag := sliceWindow(resp, limit, offset)
+		writeEnvelope(w, page, pag)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -673,10 +809,30 @@ func (h *handler) revokeRegistrationToken(w http.ResponseWriter, r *http.Request
 // --- Pricing ---
 
 func (h *handler) listPricing(w http.ResponseWriter, r *http.Request) {
+	envelope, ecode, emsg, eerr := wantEnvelope(r)
+	if eerr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, ecode, "invalid_request_error", emsg)
+		return
+	}
+	limit, offset, pcode, pmsg, perr := parsePagination(r)
+	if perr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, pcode, "invalid_request_error", pmsg)
+		return
+	}
+
+	// ListActivePricing already returns only active rows, so is_active has no
+	// endpoint-specific meaning here and is not accepted. Pricing gets
+	// envelope + pagination only.
 	pricing, err := h.store.ListActivePricing()
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list pricing error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list pricing")
+		return
+	}
+
+	if envelope {
+		page, pag := sliceWindow(pricing, limit, offset)
+		writeEnvelope(w, page, pag)
 		return
 	}
 
