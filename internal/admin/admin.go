@@ -85,8 +85,17 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	mux.HandleFunc("GET /api/admin/usage/by-user", handler.getUsageByUser)
 	mux.HandleFunc("GET /api/admin/usage/timeseries", handler.getUsageTimeseries)
 	mux.HandleFunc("GET /api/admin/users", handler.listUsers)
+	mux.HandleFunc("GET /api/admin/users/{id}", handler.getUser)
 	mux.HandleFunc("PUT /api/admin/users/{id}/activate", handler.activateUser)
 	mux.HandleFunc("PUT /api/admin/users/{id}/deactivate", handler.deactivateUser)
+	mux.HandleFunc("PUT /api/admin/users/{id}/role", handler.updateUserRole)
+
+	// Key detail + mutations (BE 3)
+	mux.HandleFunc("GET /api/admin/keys/{id}", handler.getKey)
+	mux.HandleFunc("PUT /api/admin/keys/{id}/rate-limit", handler.updateKeyRateLimit)
+
+	// Registrations audit feed (BE 3)
+	mux.HandleFunc("GET /api/admin/registrations", handler.listRegistrations)
 
 	// Credit management
 	mux.HandleFunc("GET /api/admin/accounts", handler.listAccounts)
@@ -765,4 +774,244 @@ func min(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+// --- BE 3: detail + mutations -------------------------------------------------
+
+type userDetailDTO struct {
+	ID        int64  `json:"id"`
+	Email     string `json:"email"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	IsActive  bool   `json:"is_active"`
+	AccountID *int64 `json:"account_id"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func toUserDetailDTO(u *store.User) userDetailDTO {
+	return userDetailDTO{
+		ID:        u.ID,
+		Email:     u.Email,
+		Name:      u.Name,
+		Role:      u.Role,
+		IsActive:  u.IsActive,
+		AccountID: u.AccountID,
+		CreatedAt: u.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: u.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+func (h *handler) getUser(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid user ID")
+		return
+	}
+
+	u, err := h.store.GetUserByID(id)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "get user error", "error", err, "user_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get user")
+		return
+	}
+	if u == nil {
+		proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "User not found")
+		return
+	}
+
+	writeEnvelope(w, toUserDetailDTO(u), nil)
+}
+
+func (h *handler) updateUserRole(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid user ID")
+		return
+	}
+
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		return
+	}
+
+	if err := h.store.UpdateUserRoleGuarded(id, req.Role); err != nil {
+		switch {
+		case errors.Is(err, store.ErrInvalidRole):
+			proxy.WriteError(w, r, http.StatusBadRequest, "invalid_role", "invalid_request_error", "role must be 'admin' or 'user'")
+			return
+		case errors.Is(err, store.ErrUserNotFound):
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "User not found")
+			return
+		case errors.Is(err, store.ErrLastActiveAdmin):
+			proxy.WriteError(w, r, http.StatusConflict, "last_admin", "invalid_request_error", "Cannot remove the last active admin")
+			return
+		}
+		slog.ErrorContext(r.Context(), "update user role error", "error", err, "user_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update user role")
+		return
+	}
+
+	u, err := h.store.GetUserByID(id)
+	if err != nil || u == nil {
+		// Extremely unlikely — the row existed inside the guardrail tx.
+		slog.ErrorContext(r.Context(), "reload user after role change", "error", err, "user_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to reload user")
+		return
+	}
+	writeEnvelope(w, toUserDetailDTO(u), nil)
+}
+
+type keyDetailDTO struct {
+	ID                int64  `json:"id"`
+	Name              string `json:"name"`
+	KeyPrefix         string `json:"key_prefix"`
+	RateLimit         int    `json:"rate_limit"`
+	Revoked           bool   `json:"revoked"`
+	UserID            *int64 `json:"user_id"`
+	AccountID         *int64 `json:"account_id"`
+	SessionTokenLimit *int   `json:"session_token_limit"`
+	CreatedAt         string `json:"created_at"`
+}
+
+func toKeyDetailDTO(k *store.APIKey) keyDetailDTO {
+	return keyDetailDTO{
+		ID:                k.ID,
+		Name:              k.Name,
+		KeyPrefix:         k.KeyPrefix,
+		RateLimit:         k.RateLimit,
+		Revoked:           k.Revoked,
+		UserID:            k.UserID,
+		AccountID:         k.AccountID,
+		SessionTokenLimit: k.SessionTokenLimit,
+		CreatedAt:         k.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func (h *handler) getKey(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid key ID")
+		return
+	}
+
+	k, err := h.store.GetKeyByID(id)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "get key error", "error", err, "key_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get key")
+		return
+	}
+	if k == nil {
+		proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Key not found")
+		return
+	}
+
+	writeEnvelope(w, toKeyDetailDTO(k), nil)
+}
+
+func (h *handler) updateKeyRateLimit(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid key ID")
+		return
+	}
+
+	// Pointer so we can distinguish "omitted" from "explicit 0". Omitted is
+	// rejected (we can't default silently — callers who meant to set 60 should
+	// say so); explicit 0 or negative is mapped to the default (same semantics
+	// as createKey / createAccountKey).
+	var req struct {
+		RateLimit *int `json:"rate_limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+		return
+	}
+	if req.RateLimit == nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_rate_limit", "invalid_request_error", "rate_limit is required")
+		return
+	}
+	rateLimit, err := ratelimit.ApplyConfigDefaultsAndCap(*req.RateLimit)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "rate_limit_too_high", "invalid_request_error", "rate_limit must be <= 10000")
+		return
+	}
+
+	if err := h.store.UpdateKeyRateLimit(id, rateLimit); err != nil {
+		if errors.Is(err, store.ErrKeyNotFound) {
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Key not found")
+			return
+		}
+		slog.ErrorContext(r.Context(), "update key rate_limit error", "error", err, "key_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update key")
+		return
+	}
+
+	k, err := h.store.GetKeyByID(id)
+	if err != nil || k == nil {
+		slog.ErrorContext(r.Context(), "reload key after update", "error", err, "key_id", id)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to reload key")
+		return
+	}
+	writeEnvelope(w, toKeyDetailDTO(k), nil)
+}
+
+type registrationEventDTO struct {
+	ID                  int64     `json:"id"`
+	Kind                string    `json:"kind"`
+	Source              string    `json:"source"`
+	UserID              *int64    `json:"user_id"`
+	UserEmail           *string   `json:"user_email"`
+	UserName            *string   `json:"user_name"`
+	AccountID           *int64    `json:"account_id"`
+	AccountName         *string   `json:"account_name"`
+	AccountType         *string   `json:"account_type"`
+	RegistrationTokenID *int64    `json:"registration_token_id"`
+	Metadata            any       `json:"metadata"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+func (h *handler) listRegistrations(w http.ResponseWriter, r *http.Request) {
+	limit, offset, pcode, pmsg, perr := parsePagination(r)
+	if perr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, pcode, "invalid_request_error", pmsg)
+		return
+	}
+
+	events, total, err := h.store.ListRegistrationEvents(limit, offset)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "list registrations error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list registrations")
+		return
+	}
+
+	dtos := make([]registrationEventDTO, len(events))
+	for i, e := range events {
+		var md any
+		if len(e.Metadata) > 0 {
+			// Best-effort decode so clients get structured JSON rather than a
+			// base64-encoded byte slice. On failure, surface the raw text.
+			if err := json.Unmarshal(e.Metadata, &md); err != nil {
+				md = string(e.Metadata)
+			}
+		}
+		dtos[i] = registrationEventDTO{
+			ID:                  e.ID,
+			Kind:                e.Kind,
+			Source:              e.Source,
+			UserID:              e.UserID,
+			UserEmail:           e.UserEmail,
+			UserName:            e.UserName,
+			AccountID:           e.AccountID,
+			AccountName:         e.AccountName,
+			AccountType:         e.AccountType,
+			RegistrationTokenID: e.RegistrationTokenID,
+			Metadata:            md,
+			CreatedAt:           e.CreatedAt,
+		}
+	}
+	writeEnvelope(w, dtos, &Pagination{Limit: limit, Offset: offset, Total: total})
 }

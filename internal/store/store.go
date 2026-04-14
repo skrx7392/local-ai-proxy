@@ -25,6 +25,14 @@ var ErrLastActiveAdmin = errors.New("cannot remove the last active admin")
 // does not exist.
 var ErrUserNotFound = errors.New("user not found")
 
+// ErrKeyNotFound is returned by key-mutation helpers when the target row
+// does not exist.
+var ErrKeyNotFound = errors.New("key not found")
+
+// ErrInvalidRole is returned by UpdateUserRoleGuarded when the caller
+// supplies a role outside the allowed set.
+var ErrInvalidRole = errors.New("invalid role")
+
 // pgUniqueViolation is the Postgres SQLSTATE code for unique constraint
 // violations. Used to distinguish "email already taken" from other errors.
 const pgUniqueViolation = "23505"
@@ -325,6 +333,43 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 	return keys, rows.Err()
 }
 
+// GetKeyByID looks up an API key by ID, including revoked keys so admin UI
+// can display their history.
+func (s *Store) GetKeyByID(id int64) (*APIKey, error) {
+	var apiKey APIKey
+	err := s.pool.QueryRow(
+		context.Background(),
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit
+		 FROM api_keys WHERE id = $1`, id,
+	).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.RateLimit,
+		&apiKey.CreatedAt, &apiKey.Revoked, &apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &apiKey, nil
+}
+
+// UpdateKeyRateLimit sets a new rate_limit on an existing key. The caller is
+// responsible for applying ratelimit.ApplyConfigDefaultsAndCap — this method
+// writes whatever value it's given.
+func (s *Store) UpdateKeyRateLimit(id int64, rateLimit int) error {
+	ct, err := s.pool.Exec(
+		context.Background(),
+		`UPDATE api_keys SET rate_limit = $1 WHERE id = $2`,
+		rateLimit, id,
+	)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrKeyNotFound
+	}
+	return nil
+}
+
 // RevokeKey soft-deletes a key by setting revoked = TRUE.
 func (s *Store) RevokeKey(id int64) error {
 	ct, err := s.pool.Exec(context.Background(), `UPDATE api_keys SET revoked = TRUE WHERE id = $1`, id)
@@ -514,6 +559,71 @@ func (s *Store) DeactivateUserGuarded(id int64) error {
 		`UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1`, id,
 	); err != nil {
 		return fmt.Errorf("deactivate: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// UpdateUserRoleGuarded changes a user's role with the same advisory-lock
+// protection as DeactivateUserGuarded. Demoting the last active admin is
+// rejected with ErrLastActiveAdmin; unknown roles are rejected with
+// ErrInvalidRole.
+func (s *Store) UpdateUserRoleGuarded(id int64, newRole string) error {
+	if newRole != "admin" && newRole != "user" {
+		return ErrInvalidRole
+	}
+
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('admin_mutations'))`); err != nil {
+		return fmt.Errorf("advisory lock: %w", err)
+	}
+
+	var currentRole string
+	var currentActive bool
+	err = tx.QueryRow(ctx,
+		`SELECT role, is_active FROM users WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&currentRole, &currentActive)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrUserNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load user: %w", err)
+	}
+
+	// Noop — avoids a pointless UPDATE and always-safe outcome.
+	if currentRole == newRole {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	}
+
+	// Only demotion from an active admin can breach the last-admin invariant.
+	if currentRole == "admin" && currentActive && newRole != "admin" {
+		var activeAdmins int
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = TRUE`,
+		).Scan(&activeAdmins); err != nil {
+			return fmt.Errorf("count active admins: %w", err)
+		}
+		if activeAdmins <= 1 {
+			return ErrLastActiveAdmin
+		}
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2`, newRole, id,
+	); err != nil {
+		return fmt.Errorf("update role: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
