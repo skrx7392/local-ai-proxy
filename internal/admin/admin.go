@@ -919,10 +919,11 @@ func (h *handler) updateKeyRateLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pointer so we can distinguish "omitted" from "explicit 0". Omitted is
-	// rejected (we can't default silently — callers who meant to set 60 should
-	// say so); explicit 0 or negative is mapped to the default (same semantics
-	// as createKey / createAccountKey).
+	// Pointer so we can distinguish "omitted" from "explicit 0". Unlike
+	// createKey — which maps <=0 to 60 for back-compat with clients that
+	// simply omit the field — an explicit update is required to name a
+	// positive integer (PLAN.md §PR 0 note on PR 3). We still reuse the
+	// cap helper for the upper bound.
 	var req struct {
 		RateLimit *int `json:"rate_limit"`
 	}
@@ -932,6 +933,10 @@ func (h *handler) updateKeyRateLimit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.RateLimit == nil {
 		proxy.WriteError(w, r, http.StatusBadRequest, "missing_rate_limit", "invalid_request_error", "rate_limit is required")
+		return
+	}
+	if *req.RateLimit <= 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_rate_limit", "invalid_request_error", "rate_limit must be a positive integer")
 		return
 	}
 	rateLimit, err := ratelimit.ApplyConfigDefaultsAndCap(*req.RateLimit)
