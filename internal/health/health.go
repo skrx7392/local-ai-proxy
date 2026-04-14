@@ -44,7 +44,9 @@ func (c *Checker) LiveHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"ok"}`))
 }
 
-type checkResult struct {
+// CheckResult is one component's health snapshot. Exported so other packages
+// (e.g. internal/admin) can render it under their own response shape.
+type CheckResult struct {
 	Status    string `json:"status"`
 	LatencyMs *int64 `json:"latency_ms,omitempty"`
 	Error     string `json:"error,omitempty"`
@@ -52,28 +54,28 @@ type checkResult struct {
 	Capacity  *int   `json:"queue_capacity,omitempty"`
 }
 
-// ReadyHandler checks DB, Ollama, and usage writer health. Used for k8s readiness probes.
-func (c *Checker) ReadyHandler(w http.ResponseWriter, r *http.Request) {
-	checks := map[string]checkResult{}
-	allOK := true
+// RunChecks executes every configured probe and returns whether all passed
+// plus per-component results, keyed by the spec's component name (db, ollama,
+// usage_writer). Side-effect: updates the ollamaUp gauge when set.
+func (c *Checker) RunChecks(ctx context.Context) (allOK bool, checks map[string]CheckResult) {
+	checks = map[string]CheckResult{}
+	allOK = true
 
-	// DB check
 	if c.db != nil {
 		start := time.Now()
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		err := c.db.Ping(ctx)
+		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := c.db.Ping(pingCtx)
 		cancel()
 		ms := time.Since(start).Milliseconds()
 
 		if err != nil {
 			allOK = false
-			checks["database"] = checkResult{Status: "error", LatencyMs: &ms, Error: err.Error()}
+			checks["db"] = CheckResult{Status: "error", LatencyMs: &ms, Error: err.Error()}
 		} else {
-			checks["database"] = checkResult{Status: "ok", LatencyMs: &ms}
+			checks["db"] = CheckResult{Status: "ok", LatencyMs: &ms}
 		}
 	}
 
-	// Ollama check
 	if c.ollamaURL != "" {
 		start := time.Now()
 		client := &http.Client{Timeout: 3 * time.Second}
@@ -82,30 +84,46 @@ func (c *Checker) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 
 		if err != nil {
 			allOK = false
-			checks["ollama"] = checkResult{Status: "error", LatencyMs: &ms, Error: err.Error()}
+			checks["ollama"] = CheckResult{Status: "error", LatencyMs: &ms, Error: err.Error()}
 			if c.ollamaUp != nil {
 				c.ollamaUp.Set(0)
 			}
 		} else {
 			resp.Body.Close()
-			checks["ollama"] = checkResult{Status: "ok", LatencyMs: &ms}
+			checks["ollama"] = CheckResult{Status: "ok", LatencyMs: &ms}
 			if c.ollamaUp != nil {
 				c.ollamaUp.Set(1)
 			}
 		}
 	}
 
-	// Usage writer check
 	if c.usageChLen != nil {
 		depth := c.usageChLen()
-		cap := c.usageChCap
-		result := checkResult{Status: "ok", Depth: &depth, Capacity: &cap}
-		if depth >= cap {
+		capacity := c.usageChCap
+		result := CheckResult{Status: "ok", Depth: &depth, Capacity: &capacity}
+		if depth >= capacity {
 			allOK = false
 			result.Status = "error"
 			result.Error = "usage channel full"
 		}
 		checks["usage_writer"] = result
+	}
+
+	return allOK, checks
+}
+
+// ReadyHandler checks DB, Ollama, and usage writer health. Used for k8s readiness probes.
+// Renames the db key to "database" for compatibility with existing probe consumers.
+func (c *Checker) ReadyHandler(w http.ResponseWriter, r *http.Request) {
+	allOK, checks := c.RunChecks(r.Context())
+
+	legacy := make(map[string]CheckResult, len(checks))
+	for k, v := range checks {
+		if k == "db" {
+			legacy["database"] = v
+			continue
+		}
+		legacy[k] = v
 	}
 
 	status := "ready"
@@ -119,6 +137,6 @@ func (c *Checker) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(httpStatus)
 	json.NewEncoder(w).Encode(map[string]any{
 		"status": status,
-		"checks": checks,
+		"checks": legacy,
 	})
 }
