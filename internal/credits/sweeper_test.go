@@ -12,7 +12,7 @@ func TestStartSweeper_StopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Start sweeper with very short intervals for testing
-	StartSweeper(ctx, db,
+	StartSweeper(ctx, db, nil,
 		50*time.Millisecond, 10*time.Minute,
 		50*time.Millisecond, 30*24*time.Hour,
 	)
@@ -48,7 +48,7 @@ func TestStartSweeper_ReleasesStaleHolds(t *testing.T) {
 	defer cancel()
 
 	// Sweeper with 10-minute stale threshold, checking every 50ms
-	StartSweeper(ctx, db,
+	StartSweeper(ctx, db, nil,
 		50*time.Millisecond, 10*time.Minute,
 		1*time.Hour, 30*24*time.Hour, // cleanup won't trigger during test
 	)
@@ -80,7 +80,7 @@ func TestStartSweeper_CleansUpOldHolds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	StartSweeper(ctx, db,
+	StartSweeper(ctx, db, nil,
 		1*time.Hour, 10*time.Minute, // sweep won't trigger
 		50*time.Millisecond, 30*24*time.Hour, // cleanup checks every 50ms
 	)

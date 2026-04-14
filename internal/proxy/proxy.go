@@ -497,6 +497,7 @@ func (h *handler) logUsage(key *store.APIKey, ud usageData, duration time.Durati
 	case h.usageCh <- entry:
 	default:
 		slog.Warn("usage channel full, dropping entry", "model", ud.Model, "api_key_id", key.ID)
+		h.metrics.RecordUsageDrop()
 	}
 }
 

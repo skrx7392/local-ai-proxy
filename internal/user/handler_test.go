@@ -50,7 +50,7 @@ func setupUserTest(t *testing.T) (http.Handler, *store.Store) {
 		s.Close()
 	})
 
-	h := NewHandler(s, 0)
+	h := NewHandler(s, 0, nil)
 	return h, s
 }
 

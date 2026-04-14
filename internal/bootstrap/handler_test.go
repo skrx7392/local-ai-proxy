@@ -53,7 +53,7 @@ func setupBootstrapTest(t *testing.T, tokenOverride *string) (http.Handler, *sto
 	if tokenOverride != nil {
 		tok = *tokenOverride
 	}
-	return New(s, tok), s
+	return New(s, tok, nil), s
 }
 
 func TestBootstrap_DisabledWhenTokenEmpty(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
 	"github.com/krishna/local-ai-proxy/internal/store"
@@ -20,6 +21,7 @@ import (
 type handler struct {
 	store              *store.Store
 	defaultCreditGrant float64
+	metrics            *metrics.Metrics
 }
 
 type registerRequest struct {
@@ -86,8 +88,8 @@ type keyResponse struct {
 	Revoked   bool   `json:"revoked"`
 }
 
-func NewHandler(dataStore *store.Store, defaultCreditGrant float64) http.Handler {
-	h := &handler{store: dataStore, defaultCreditGrant: defaultCreditGrant}
+func NewHandler(dataStore *store.Store, defaultCreditGrant float64, m *metrics.Metrics) http.Handler {
+	h := &handler{store: dataStore, defaultCreditGrant: defaultCreditGrant, metrics: m}
 
 	mux := http.NewServeMux()
 
@@ -142,6 +144,7 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		proxy.WriteError(w, r, http.StatusConflict, "email_exists", "invalid_request_error", "Email already registered")
 		return
 	}
+	h.metrics.RecordRegistration("user_signup")
 
 	// Grant default credits if configured
 	if h.defaultCreditGrant > 0 {
@@ -617,6 +620,7 @@ func (h *handler) registerServiceAccount(w http.ResponseWriter, r *http.Request)
 		proxy.WriteError(w, r, http.StatusBadRequest, "registration_failed", "invalid_request_error", err.Error())
 		return
 	}
+	h.metrics.RecordRegistration("service_registration")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
