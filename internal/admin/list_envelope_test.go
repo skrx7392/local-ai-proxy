@@ -354,6 +354,7 @@ func TestListPricing_LegacyShape(t *testing.T) {
 	if len(arr) < 2 {
 		t.Errorf("len=%d, want >=2", len(arr))
 	}
+	assertPricingSnakeCaseKeys(t, arr[0])
 }
 
 func TestListPricing_Envelope_Pagination(t *testing.T) {
@@ -372,6 +373,23 @@ func TestListPricing_Envelope_Pagination(t *testing.T) {
 	}
 	if len(data) != 2 {
 		t.Errorf("len(data) = %d, want 2", len(data))
+	}
+	assertPricingSnakeCaseKeys(t, data[0])
+}
+
+func assertPricingSnakeCaseKeys(t *testing.T, row map[string]any) {
+	t.Helper()
+	want := []string{"id", "model_id", "prompt_rate", "completion_rate", "typical_completion", "effective_from", "active"}
+	for _, k := range want {
+		if _, ok := row[k]; !ok {
+			t.Errorf("missing snake_case key %q in pricing row: %+v", k, row)
+		}
+	}
+	forbidden := []string{"ID", "ModelID", "PromptRate", "CompletionRate", "TypicalCompletion", "EffectiveFrom", "Active"}
+	for _, k := range forbidden {
+		if _, ok := row[k]; ok {
+			t.Errorf("PascalCase key %q leaked into pricing wire shape: %+v", k, row)
+		}
 	}
 }
 
