@@ -61,11 +61,11 @@ func TestListKeys_LegacyShape_NoEnvelopeMetadata(t *testing.T) {
 	h, s := setupAdminTest(t)
 	seedThreeKeys(t, s)
 
-	rec := doAdminGET(t, h, "/api/admin/keys")
+	rec := doAdminGET(t, h, "/api/admin/keys?envelope=0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	// Legacy: must decode as a raw array. Any pagination key is a regression.
+	// Legacy (envelope=0): must decode as a raw array. Any pagination key is a regression.
 	var arr []keyResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &arr); err != nil {
 		t.Fatalf("legacy shape must be a raw array: %v", err)
@@ -80,11 +80,12 @@ func TestListKeys_LegacyShape_NoEnvelopeMetadata(t *testing.T) {
 
 func TestListKeys_LegacyShape_WithIsActiveFilter_NoPagination(t *testing.T) {
 	// is_active on /keys means "not revoked". Filters apply in legacy mode;
-	// only the envelope wrapper is gated behind envelope=1.
+	// envelope=0 is the post-BE-7 opt-out for ad-hoc scripts that still expect
+	// a raw array.
 	h, s := setupAdminTest(t)
 	seedThreeKeys(t, s)
 
-	rec := doAdminGET(t, h, "/api/admin/keys?is_active=true")
+	rec := doAdminGET(t, h, "/api/admin/keys?envelope=0&is_active=true")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -144,6 +145,27 @@ func TestListKeys_Envelope_LimitOffset(t *testing.T) {
 	}
 }
 
+// TestListKeys_DefaultIsEnvelope_BE7 locks in the BE 7 contract flip: with
+// no `envelope` query param, the response MUST be the `{data, pagination}`
+// envelope, not the legacy raw array. If this test ever starts passing with
+// a raw array again, BE 7 has regressed.
+func TestListKeys_DefaultIsEnvelope_BE7(t *testing.T) {
+	h, s := setupAdminTest(t)
+	seedThreeKeys(t, s)
+
+	rec := doAdminGET(t, h, "/api/admin/keys")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	data, pag := decodeEnvelope[[]keyResponse](t, rec.Body.Bytes())
+	if pag == nil {
+		t.Fatal("default response must include pagination envelope (BE 7)")
+	}
+	if len(data) != 3 {
+		t.Errorf("len(data)=%d, want 3", len(data))
+	}
+}
+
 func TestListKeys_InvalidEnvelope_400(t *testing.T) {
 	h, _ := setupAdminTest(t)
 	rec := doAdminGET(t, h, "/api/admin/keys?envelope=true")
@@ -190,7 +212,7 @@ func TestListUsers_LegacyShape(t *testing.T) {
 	seedUserWithRoleAndActive(t, s, "u1@example.com", "U1", "user", true)
 	seedUserWithRoleAndActive(t, s, "u2@example.com", "U2", "admin", true)
 
-	rec := doAdminGET(t, h, "/api/admin/users")
+	rec := doAdminGET(t, h, "/api/admin/users?envelope=0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -275,7 +297,7 @@ func TestListAccounts_LegacyShape(t *testing.T) {
 	if _, err := s.CreateAccount("acc-b", "service"); err != nil {
 		t.Fatalf("CreateAccount: %v", err)
 	}
-	rec := doAdminGET(t, h, "/api/admin/accounts")
+	rec := doAdminGET(t, h, "/api/admin/accounts?envelope=0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -340,7 +362,7 @@ func TestListPricing_LegacyShape(t *testing.T) {
 	_ = s.UpsertPricing("m1", 0.001, 0.002, 500)
 	_ = s.UpsertPricing("m2", 0.003, 0.004, 500)
 
-	rec := doAdminGET(t, h, "/api/admin/pricing")
+	rec := doAdminGET(t, h, "/api/admin/pricing?envelope=0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -400,7 +422,7 @@ func TestListRegistrationTokens_LegacyShape(t *testing.T) {
 	_, _ = s.CreateRegistrationToken("t1", "reg-hash-1", 10, 1, nil)
 	_, _ = s.CreateRegistrationToken("t2", "reg-hash-2", 10, 1, nil)
 
-	rec := doAdminGET(t, h, "/api/admin/registration-tokens")
+	rec := doAdminGET(t, h, "/api/admin/registration-tokens?envelope=0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -442,9 +464,9 @@ func TestGetUsage_LegacyShape_PreservesExistingParams(t *testing.T) {
 		DurationMs: 100, Status: "completed",
 	})
 
-	// No envelope param → legacy raw array shape, existing key_id filter
-	// still honored.
-	rec := doAdminGET(t, h, fmt.Sprintf("/api/admin/usage?key_id=%d", id))
+	// envelope=0 → legacy raw array shape (post-BE-7 opt-out), existing
+	// key_id filter still honored.
+	rec := doAdminGET(t, h, fmt.Sprintf("/api/admin/usage?envelope=0&key_id=%d", id))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}

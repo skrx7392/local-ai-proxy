@@ -12,7 +12,7 @@ func TestWantEnvelope(t *testing.T) {
 		wantErr bool
 		code    string
 	}{
-		{"", false, false, ""},
+		{"", true, false, ""},
 		{"envelope=0", false, false, ""},
 		{"envelope=1", true, false, ""},
 		{"envelope=true", false, true, "invalid_envelope"},

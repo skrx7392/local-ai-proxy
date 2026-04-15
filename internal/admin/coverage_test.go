@@ -25,7 +25,7 @@ func TestAdmin_ListAccounts(t *testing.T) {
 	_ = s.InitCreditBalance(accountID)
 	_ = s.AddCredits(accountID, 25.5, "seed")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/accounts", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/accounts?envelope=0", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -267,7 +267,7 @@ func TestAdmin_ListRegistrationTokens(t *testing.T) {
 		t.Fatalf("seed failed: %d", rec.Code)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/api/admin/registration-tokens", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/registration-tokens?envelope=0", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -343,7 +343,7 @@ func TestAdmin_UpsertListDeletePricing(t *testing.T) {
 		t.Fatalf("upsert: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/api/admin/pricing", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/pricing?envelope=0", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

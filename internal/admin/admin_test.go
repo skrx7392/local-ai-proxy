@@ -185,8 +185,8 @@ func TestAdmin_ListKeys(t *testing.T) {
 	createRec := httptest.NewRecorder()
 	h.ServeHTTP(createRec, createReq)
 
-	// List keys
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil)
+	// List keys (envelope=0 → raw array for this legacy-shape assertion)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/keys?envelope=0", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -290,8 +290,8 @@ func TestAdmin_GetUsage(t *testing.T) {
 		Status:           "completed",
 	})
 
-	// Get usage
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/usage", nil)
+	// Get usage (envelope=0 → raw array for this legacy-shape assertion)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/usage?envelope=0", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 
@@ -406,7 +406,7 @@ func TestAdmin_ListUsers(t *testing.T) {
 	_, _ = s.CreateUser("admin-list1@example.com", "hash", "User One")
 	_, _ = s.CreateUser("admin-list2@example.com", "hash", "User Two")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/users?envelope=0", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
