@@ -410,13 +410,13 @@ func TestUsageEndpoints_InvalidAdminKey(t *testing.T) {
 // --- legacy /api/admin/usage regression ------------------------------------
 
 func TestLegacyUsageEndpoint_StillReturnsBareArray(t *testing.T) {
-	// BE 2 must not disturb the existing /api/admin/usage shape. BE 4 flips
-	// it to enveloped on opt-in; BE 7 makes envelope the default. Until then,
-	// the response body must remain a plain JSON array (no "data" wrapper).
+	// BE 7 made envelope the default on /api/admin/usage. The legacy raw-array
+	// shape is still reachable via ?envelope=0 for one deprecation cycle so
+	// ad-hoc X-Admin-Key scripts aren't broken mid-cycle.
 	h, s := setupAdminTest(t)
 	seedUsageFixtureHTTP(t, s)
 
-	rec := doAdmin(t, h, "/api/admin/usage")
+	rec := doAdmin(t, h, "/api/admin/usage?envelope=0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}

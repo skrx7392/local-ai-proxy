@@ -5,18 +5,18 @@ import (
 	"strconv"
 )
 
-// wantEnvelope reports whether the caller asked for the `{data, pagination}`
-// envelope via `?envelope=1`. Any other non-empty value besides "0" is a
-// validation error so typos like `envelope=true` don't silently fall through
-// to the legacy raw-array path. The returned code/message feed directly into
-// proxy.WriteError when err is non-nil.
+// wantEnvelope reports whether the response should use the `{data, pagination}`
+// envelope. As of BE 7 envelope is the default; callers can opt out with
+// `?envelope=0` for one deprecation release as a safety valve for ad-hoc
+// `X-Admin-Key` scripts. Any other non-empty value is a validation error so
+// typos like `envelope=true` don't silently fall through.
 func wantEnvelope(r *http.Request) (bool, string, string, error) {
 	raw := r.URL.Query().Get("envelope")
 	switch raw {
-	case "", "0":
-		return false, "", "", nil
-	case "1":
+	case "", "1":
 		return true, "", "", nil
+	case "0":
+		return false, "", "", nil
 	default:
 		return false, "invalid_envelope", "envelope must be 0 or 1", strconv.ErrSyntax
 	}
