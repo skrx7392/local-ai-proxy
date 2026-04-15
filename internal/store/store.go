@@ -132,13 +132,13 @@ type CreditHold struct {
 }
 
 type CreditPricing struct {
-	ID                int64
-	ModelID           string
-	PromptRate        float64
-	CompletionRate    float64
-	TypicalCompletion int
-	EffectiveFrom     time.Time
-	Active            bool
+	ID                int64     `json:"id"`
+	ModelID           string    `json:"model_id"`
+	PromptRate        float64   `json:"prompt_rate"`
+	CompletionRate    float64   `json:"completion_rate"`
+	TypicalCompletion int       `json:"typical_completion"`
+	EffectiveFrom     time.Time `json:"effective_from"`
+	Active            bool      `json:"active"`
 }
 
 type AccountUsageStats struct {
