@@ -57,6 +57,18 @@ type timeseriesBucketDTO struct {
 	Errors           int       `json:"errors"`
 }
 
+// timeseriesResponseDTO is the single-aggregate payload for
+// GET /api/admin/usage/timeseries. Wrapping buckets inside an object (rather
+// than returning a bare slice) lets the interval discriminator ride on the
+// same response, which the FE chart needs to label axes without second-guessing
+// bucket spacing. Per PLAN.md §Locked Decision #20 this is a **detail**
+// envelope — the FE parses with parseDataEnvelope and must never see a
+// pagination block here.
+type timeseriesResponseDTO struct {
+	Interval string                `json:"interval"`
+	Buckets  []timeseriesBucketDTO `json:"buckets"`
+}
+
 // --- Query parsing ---------------------------------------------------------
 
 const (
@@ -342,7 +354,7 @@ func (h *handler) getUsageTimeseries(w http.ResponseWriter, r *http.Request) {
 			Errors:           b.Errors,
 		}
 	}
-	writeEnvelope(w, dtos, nil)
+	writeEnvelope(w, timeseriesResponseDTO{Interval: interval, Buckets: dtos}, nil)
 }
 
 // deriveOwnerType maps the three populations documented in PLAN.md §By-User.
