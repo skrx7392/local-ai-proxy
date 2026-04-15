@@ -275,6 +275,20 @@ func TestUsageByUser_OwnerTypeDerivation(t *testing.T) {
 }
 
 // --- timeseries -----------------------------------------------------------
+//
+// Timeseries is locked to the **detail envelope** shape per PLAN.md §Locked
+// Decision #20: `{"data": {"interval": "hour"|"day", "buckets": [...]}}`.
+// List-envelope (`{data: [...], pagination}`) would lie about pagination.total
+// and force the FE to re-key on bucket count. All tests below assert the
+// object-wrapped detail shape; body.Data is an object, not an array.
+
+type timeseriesBody struct {
+	Data struct {
+		Interval string                `json:"interval"`
+		Buckets  []timeseriesBucketDTO `json:"buckets"`
+	} `json:"data"`
+	Pagination *Pagination `json:"pagination"`
+}
 
 func TestUsageTimeseries_GapFillMiddleHole(t *testing.T) {
 	h, s := setupAdminTest(t)
@@ -292,30 +306,30 @@ func TestUsageTimeseries_GapFillMiddleHole(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	var body struct {
-		Data       []timeseriesBucketDTO `json:"data"`
-		Pagination *Pagination           `json:"pagination"`
-	}
+	var body timeseriesBody
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if body.Pagination != nil {
 		t.Errorf("timeseries must not include pagination, got %+v", body.Pagination)
 	}
-	if len(body.Data) != 7 {
-		t.Fatalf("len(data) = %d, want 7 hourly buckets", len(body.Data))
+	if body.Data.Interval != "hour" {
+		t.Errorf("interval = %q, want %q", body.Data.Interval, "hour")
+	}
+	if len(body.Data.Buckets) != 7 {
+		t.Fatalf("len(buckets) = %d, want 7 hourly buckets", len(body.Data.Buckets))
 	}
 
 	wantRequests := []int{1, 1, 1, 0, 0, 1, 1}
 	for i, want := range wantRequests {
-		if body.Data[i].Requests != want {
+		if body.Data.Buckets[i].Requests != want {
 			t.Errorf("bucket[%d].requests = %d, want %d (bucket=%v)",
-				i, body.Data[i].Requests, want, body.Data[i].Bucket)
+				i, body.Data.Buckets[i].Requests, want, body.Data.Buckets[i].Bucket)
 		}
 	}
 }
 
-func TestUsageTimeseries_DefaultIntervalRespectsWindow(t *testing.T) {
+func TestUsageTimeseries_DefaultIntervalHourlyForShortWindow(t *testing.T) {
 	h, s := setupAdminTest(t)
 	fx := seedUsageFixtureHTTP(t, s)
 
@@ -328,12 +342,78 @@ func TestUsageTimeseries_DefaultIntervalRespectsWindow(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var body struct {
-		Data []timeseriesBucketDTO `json:"data"`
-	}
+	var body timeseriesBody
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if len(body.Data) != 2 {
-		t.Errorf("len(data) = %d, want 2 (hourly buckets over 2h)", len(body.Data))
+	if body.Data.Interval != "hour" {
+		t.Errorf("interval = %q, want %q for <=48h window", body.Data.Interval, "hour")
+	}
+	if len(body.Data.Buckets) != 2 {
+		t.Errorf("len(buckets) = %d, want 2 (hourly buckets over 2h)", len(body.Data.Buckets))
+	}
+}
+
+// Ranges wider than the 48h cutoff must default to interval="day". PLAN.md §20
+// fixes the cutoff so a dashboard asking for a week of data doesn't quietly
+// return 168 hourly buckets.
+func TestUsageTimeseries_DefaultIntervalDailyForLongWindow(t *testing.T) {
+	h, s := setupAdminTest(t)
+	seedUsageFixtureHTTP(t, s)
+
+	// Use day-aligned boundaries so the bucket count is deterministic. The
+	// gap-fill loop truncates `since` down to the interval boundary, so a
+	// since not on 00:00 UTC yields one extra bucket. Aligning here keeps
+	// the assertion tight.
+	dayStart := time.Now().UTC().Truncate(24 * time.Hour)
+	since := dayStart.Add(-5 * 24 * time.Hour)
+	until := dayStart.Add(2 * 24 * time.Hour) // 7 whole days, >48h
+	path := fmt.Sprintf("/api/admin/usage/timeseries?since=%s&until=%s",
+		since.Format(time.RFC3339), until.Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body timeseriesBody
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Data.Interval != "day" {
+		t.Errorf("interval = %q, want %q for >48h window", body.Data.Interval, "day")
+	}
+	if len(body.Data.Buckets) != 7 {
+		t.Errorf("len(buckets) = %d, want 7 daily buckets", len(body.Data.Buckets))
+	}
+}
+
+// Empty range (window with zero rows) must still return a dense series of
+// zero-valued buckets — not an empty array. PLAN.md §20 calls this out because
+// the FE chart renders axis ticks from bucket timestamps; an empty array would
+// leave it with no x-axis at all.
+func TestUsageTimeseries_EmptyRangeReturnsZeroBuckets(t *testing.T) {
+	h, s := setupAdminTest(t)
+	seedUsageFixtureHTTP(t, s)
+
+	// Pick a 3h window far from any fixture row so every bucket is empty.
+	farFuture := time.Now().UTC().Add(10 * 24 * time.Hour).Truncate(time.Hour)
+	since := farFuture
+	until := farFuture.Add(3 * time.Hour)
+	path := fmt.Sprintf("/api/admin/usage/timeseries?interval=hour&since=%s&until=%s",
+		since.Format(time.RFC3339), until.Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body timeseriesBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Data.Interval != "hour" {
+		t.Errorf("interval = %q, want %q", body.Data.Interval, "hour")
+	}
+	if len(body.Data.Buckets) != 3 {
+		t.Fatalf("len(buckets) = %d, want 3 zero-valued buckets (not an empty array)", len(body.Data.Buckets))
+	}
+	for i, b := range body.Data.Buckets {
+		if b.Requests != 0 || b.TotalTokens != 0 || b.Credits != 0 || b.Errors != 0 {
+			t.Errorf("bucket[%d] should be zero-valued, got %+v", i, b)
+		}
 	}
 }
 
