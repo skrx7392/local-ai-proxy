@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: ai-proxy
-          image: local-ai-proxy:latest
-          imagePullPolicy: Never
+          image: ghcr.io/skrx7392/local-ai-proxy:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           env:
