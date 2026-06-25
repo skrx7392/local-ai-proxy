@@ -4,17 +4,17 @@ metadata:
   name: ai-proxy-ingress
   namespace: local-ai
   annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/cluster-issuer: letsencrypt-cloudflare
     # Disable response buffering for SSE streaming
     traefik.ingress.kubernetes.io/buffering-retries: "0"
 spec:
   ingressClassName: traefik
   tls:
     - hosts:
-        - ai.kinvee.in
-      secretName: ai-proxy-tls
+        - ai.skpodduturi.dev
+      secretName: ai-proxy-skpodduturi-tls
   rules:
-    - host: ai.kinvee.in
+    - host: ai.skpodduturi.dev
       http:
         paths:
           - path: /api
