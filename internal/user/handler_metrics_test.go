@@ -50,7 +50,7 @@ func setupUserMetricsTest(t *testing.T) (http.Handler, *store.Store, *metrics.Me
 	})
 
 	m := metrics.New(func() int { return 0 })
-	h := NewHandler(s, 0, m)
+	h := NewHandler(s, 0, m, nil)
 	return h, s, m
 }
 

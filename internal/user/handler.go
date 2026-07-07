@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/authlimit"
 	"github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
@@ -22,6 +25,7 @@ type handler struct {
 	store              *store.Store
 	defaultCreditGrant float64
 	metrics            *metrics.Metrics
+	guard              *authlimit.Guard
 }
 
 type registerRequest struct {
@@ -88,8 +92,11 @@ type keyResponse struct {
 	Revoked   bool   `json:"revoked"`
 }
 
-func NewHandler(dataStore *store.Store, defaultCreditGrant float64, m *metrics.Metrics) http.Handler {
-	h := &handler{store: dataStore, defaultCreditGrant: defaultCreditGrant, metrics: m}
+// NewHandler builds the user-facing API handler. guard throttles the
+// bcrypt-heavy endpoints (per-email login attempts, global bcrypt
+// concurrency); nil disables both limits.
+func NewHandler(dataStore *store.Store, defaultCreditGrant float64, m *metrics.Metrics, guard *authlimit.Guard) http.Handler {
+	h := &handler{store: dataStore, defaultCreditGrant: defaultCreditGrant, metrics: m, guard: guard}
 
 	mux := http.NewServeMux()
 
@@ -116,6 +123,14 @@ func NewHandler(dataStore *store.Store, defaultCreditGrant float64, m *metrics.M
 	return mux
 }
 
+// writeThrottled emits the standard 429 envelope with a Retry-After header
+// and bumps the rate-limit reject metric.
+func (h *handler) writeThrottled(w http.ResponseWriter, r *http.Request, retryAfter float64, message string) {
+	h.metrics.RecordRateLimitReject()
+	w.Header().Set("Retry-After", fmt.Sprintf("%.0f", math.Ceil(retryAfter)))
+	proxy.WriteError(w, r, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded", message)
+}
+
 func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -131,7 +146,12 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.guard.TryAcquireBcrypt() {
+		h.writeThrottled(w, r, 1, "Server is busy, retry shortly")
+		return
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	h.guard.ReleaseBcrypt()
 	if err != nil {
 		slog.ErrorContext(r.Context(), "bcrypt error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to hash password")
@@ -170,6 +190,12 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-email throttle: IP rotation cannot keep hammering one account.
+	if ok, retryAfter := h.guard.AllowLoginEmail(req.Email); !ok {
+		h.writeThrottled(w, r, retryAfter, "Too many login attempts for this account, retry later")
+		return
+	}
+
 	user, err := h.store.GetUserByEmail(req.Email)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "get user error", "error", err, "email", req.Email)
@@ -185,7 +211,13 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+	if !h.guard.TryAcquireBcrypt() {
+		h.writeThrottled(w, r, 1, "Server is busy, retry shortly")
+		return
+	}
+	compareErr := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+	h.guard.ReleaseBcrypt()
+	if compareErr != nil {
 		proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "invalid_request_error", "Invalid email or password")
 		return
 	}
@@ -309,12 +341,20 @@ func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.OldPassword)); err != nil {
+	// One slot covers both bcrypt operations; there is no I/O between them.
+	if !h.guard.TryAcquireBcrypt() {
+		h.writeThrottled(w, r, 1, "Server is busy, retry shortly")
+		return
+	}
+	compareErr := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.OldPassword))
+	if compareErr != nil {
+		h.guard.ReleaseBcrypt()
 		proxy.WriteError(w, r, http.StatusUnauthorized, "wrong_password", "invalid_request_error", "Current password is incorrect")
 		return
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	h.guard.ReleaseBcrypt()
 	if err != nil {
 		slog.ErrorContext(r.Context(), "bcrypt error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to hash password")

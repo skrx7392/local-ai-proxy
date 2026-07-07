@@ -16,6 +16,14 @@ type Config struct {
 	MaxRequestBody      int64
 	DefaultCreditGrant  float64
 	LogLevel            string
+
+	// Public auth-surface rate limits (requests per minute) and the global
+	// bcrypt concurrency cap. See internal/authlimit.
+	AuthLoginPerMinIP     int
+	AuthLoginPerMinEmail  int
+	AuthRegisterPerMinIP  int
+	AuthGeneralPerMinIP   int
+	AuthBcryptConcurrency int
 }
 
 func Load() (Config, error) {
@@ -47,6 +55,27 @@ func Load() (Config, error) {
 		defaultCreditGrant = n
 	}
 
+	authLoginIP, err := intEnvOrDefault("AUTH_RATELIMIT_LOGIN_PER_MIN", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	authLoginEmail, err := intEnvOrDefault("AUTH_RATELIMIT_LOGIN_EMAIL_PER_MIN", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	authRegisterIP, err := intEnvOrDefault("AUTH_RATELIMIT_REGISTER_PER_MIN", 3)
+	if err != nil {
+		return Config{}, err
+	}
+	authGeneralIP, err := intEnvOrDefault("AUTH_RATELIMIT_GENERAL_PER_MIN", 120)
+	if err != nil {
+		return Config{}, err
+	}
+	bcryptConcurrency, err := intEnvOrDefault("AUTH_BCRYPT_MAX_CONCURRENT", 8)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		OllamaURL:           envOrDefault("OLLAMA_URL", "http://localhost:11434"),
 		AdminKey:            adminKey,
@@ -57,7 +86,31 @@ func Load() (Config, error) {
 		MaxRequestBody:      maxBody,
 		DefaultCreditGrant:  defaultCreditGrant,
 		LogLevel:            envOrDefault("LOG_LEVEL", "info"),
+
+		AuthLoginPerMinIP:     authLoginIP,
+		AuthLoginPerMinEmail:  authLoginEmail,
+		AuthRegisterPerMinIP:  authRegisterIP,
+		AuthGeneralPerMinIP:   authGeneralIP,
+		AuthBcryptConcurrency: bcryptConcurrency,
 	}, nil
+}
+
+// intEnvOrDefault parses a positive integer env var, returning fallback when
+// unset. Zero, negative, and non-numeric values are configuration errors —
+// silently disabling a security limit is worse than failing to boot.
+func intEnvOrDefault(key string, fallback int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid %s: must be a positive integer, got %d", key, n)
+	}
+	return n, nil
 }
 
 func envOrDefault(key, fallback string) string {
