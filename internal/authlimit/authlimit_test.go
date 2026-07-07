@@ -1,6 +1,7 @@
 package authlimit
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -146,6 +147,25 @@ func TestGuard_LoginEmailIsCaseInsensitive(t *testing.T) {
 	g.AllowLoginEmail("User@Example.COM")
 	if ok, _ := g.AllowLoginEmail("user@example.com"); ok {
 		t.Fatal("email buckets must be case-insensitive")
+	}
+}
+
+func TestGuard_EmailKeysAreBoundedInMemory(t *testing.T) {
+	nowFn, _ := testClock()
+	g := NewWithClock(Config{LoginPerMinEmail: 5}, nowFn)
+
+	huge := strings.Repeat("x", 1<<20) + "@example.com" // 1MB "email"
+	g.AllowLoginEmail(huge)
+
+	g.loginEmail.mu.Lock()
+	defer g.loginEmail.mu.Unlock()
+	if len(g.loginEmail.buckets) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(g.loginEmail.buckets))
+	}
+	for key := range g.loginEmail.buckets {
+		if len(key) > 64 {
+			t.Errorf("bucket key length = %d, want <= 64 (hashed)", len(key))
+		}
 	}
 }
 

@@ -13,14 +13,20 @@ import (
 // XFF is spoofable only if the ingress is bypassed (cluster-internal
 // traffic); the per-email login throttle covers targeted-account abuse
 // regardless of the IP presented.
+//
+// Header-derived candidates must parse as IP addresses — clients control the
+// leading XFF entries, and accepting arbitrary strings would let them both
+// dodge the bucket and bloat the limiter map with huge keys. Anything
+// unparseable falls through to the connection's RemoteAddr.
 func ClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
-			return strings.TrimSpace(first)
+		first, _, _ := strings.Cut(xff, ",")
+		if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
+			return ip.String()
 		}
 	}
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		return realIP
+	if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); ip != nil {
+		return ip.String()
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

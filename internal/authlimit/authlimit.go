@@ -10,6 +10,8 @@
 package authlimit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
 	"strings"
 	"sync"
@@ -156,13 +158,16 @@ func (g *Guard) AllowLoginIP(ip string) (bool, float64) {
 	return g.loginIP.allow(ip)
 }
 
-// AllowLoginEmail consumes a login token for the given target email. Keys
-// are lowercased so casing cannot bypass the throttle.
+// AllowLoginEmail consumes a login token for the given target email. The
+// bucket key is the SHA-256 of the lowercased email: casing cannot bypass
+// the throttle, and an attacker submitting huge unique "emails" retains at
+// most 64 bytes of key per bucket instead of the raw string.
 func (g *Guard) AllowLoginEmail(email string) (bool, float64) {
 	if g == nil {
 		return true, 0
 	}
-	return g.loginEmail.allow(strings.ToLower(email))
+	sum := sha256.Sum256([]byte(strings.ToLower(email)))
+	return g.loginEmail.allow(hex.EncodeToString(sum[:]))
 }
 
 // AllowRegisterIP consumes a registration token for the given client IP.

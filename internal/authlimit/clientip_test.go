@@ -52,6 +52,38 @@ func TestClientIP_RemoteAddrWithoutPort(t *testing.T) {
 	}
 }
 
+func TestClientIP_GarbageXFFFallsBackToRemoteAddr(t *testing.T) {
+	r := httptest.NewRequest("POST", "/api/auth/login", nil)
+	r.RemoteAddr = "192.0.2.44:12345"
+	// Clients control the leading XFF entries; junk must not become a
+	// rate-limit key.
+	r.Header.Set("X-Forwarded-For", "not-an-ip-aaaaaaaaaaaaaaaaaaaaaaaa, 10.0.0.1")
+
+	if got := ClientIP(r); got != "192.0.2.44" {
+		t.Errorf("ClientIP = %q, want RemoteAddr host for unparseable XFF", got)
+	}
+}
+
+func TestClientIP_GarbageXRealIPFallsBackToRemoteAddr(t *testing.T) {
+	r := httptest.NewRequest("POST", "/api/auth/login", nil)
+	r.RemoteAddr = "192.0.2.44:12345"
+	r.Header.Set("X-Real-IP", "junk-value")
+
+	if got := ClientIP(r); got != "192.0.2.44" {
+		t.Errorf("ClientIP = %q, want RemoteAddr host for unparseable X-Real-IP", got)
+	}
+}
+
+func TestClientIP_IPv6XFF(t *testing.T) {
+	r := httptest.NewRequest("POST", "/api/auth/login", nil)
+	r.RemoteAddr = "192.0.2.44:12345"
+	r.Header.Set("X-Forwarded-For", "2001:db8::7")
+
+	if got := ClientIP(r); got != "2001:db8::7" {
+		t.Errorf("ClientIP = %q, want 2001:db8::7", got)
+	}
+}
+
 func TestClientIP_EmptyXFFIgnored(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/auth/login", nil)
 	r.RemoteAddr = "192.0.2.44:12345"
