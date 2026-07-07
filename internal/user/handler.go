@@ -27,7 +27,23 @@ type handler struct {
 	defaultCreditGrant float64
 	metrics            *metrics.Metrics
 	guard              *authlimit.Guard
+
+	// comparePassword is bcrypt.CompareHashAndPassword in production;
+	// injectable so tests can count invocations without timing assertions.
+	comparePassword func(hashedPassword, password []byte) error
 }
+
+// dummyPasswordHash is compared against when a login targets an unknown
+// email, so response timing does not reveal whether an account exists. The
+// plaintext is irrelevant; it only has to be a well-formed hash at the same
+// cost as real user hashes (bcrypt.DefaultCost).
+var dummyPasswordHash = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("timing-equalization-dummy"), bcrypt.DefaultCost)
+	if err != nil {
+		panic("user: generate dummy bcrypt hash: " + err.Error())
+	}
+	return h
+}()
 
 type registerRequest struct {
 	Email    string `json:"email"`
@@ -97,7 +113,13 @@ type keyResponse struct {
 // bcrypt-heavy endpoints (per-email login attempts, global bcrypt
 // concurrency); nil disables both limits.
 func NewHandler(dataStore *store.Store, defaultCreditGrant float64, m *metrics.Metrics, guard *authlimit.Guard) http.Handler {
-	h := &handler{store: dataStore, defaultCreditGrant: defaultCreditGrant, metrics: m, guard: guard}
+	h := &handler{
+		store:              dataStore,
+		defaultCreditGrant: defaultCreditGrant,
+		metrics:            m,
+		guard:              guard,
+		comparePassword:    bcrypt.CompareHashAndPassword,
+	}
 
 	mux := http.NewServeMux()
 
@@ -160,7 +182,11 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 
 	accountID, userID, err := h.store.RegisterUser(req.Email, string(hash), req.Name)
 	if err != nil {
-		// Check for duplicate email (unique constraint violation)
+		// Duplicate email (unique constraint violation). The distinct 409
+		// does reveal that the email has an account — a deliberate
+		// trade-off: this is an admin-provisioned system and the per-IP
+		// register rate limit blunts mass enumeration. Login, by contrast,
+		// stays fully generic (see the timing equalization in login).
 		proxy.WriteError(w, r, http.StatusConflict, "email_exists", "invalid_request_error", "Email already registered")
 		return
 	}
@@ -201,20 +227,26 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Internal error")
 		return
 	}
-	if user == nil {
-		proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "invalid_request_error", "Invalid email or password")
-		return
-	}
-	if !user.IsActive {
-		proxy.WriteError(w, r, http.StatusForbidden, "account_disabled", "invalid_request_error", "Account is disabled")
-		return
-	}
 
 	if !h.guard.TryAcquireBcrypt() {
 		h.writeThrottled(w, r, 1, "Server is busy, retry shortly")
 		return
 	}
-	compareErr := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+	if user == nil {
+		// Equalize timing: an unknown email must cost the same bcrypt
+		// comparison as a wrong password, or response latency reveals
+		// which emails have accounts. Result discarded; same generic 401.
+		_ = h.comparePassword(dummyPasswordHash, []byte(req.Password))
+		h.guard.ReleaseBcrypt()
+		proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "invalid_request_error", "Invalid email or password")
+		return
+	}
+	if !user.IsActive {
+		h.guard.ReleaseBcrypt()
+		proxy.WriteError(w, r, http.StatusForbidden, "account_disabled", "invalid_request_error", "Account is disabled")
+		return
+	}
+	compareErr := h.comparePassword([]byte(user.PasswordHash), []byte(req.Password))
 	h.guard.ReleaseBcrypt()
 	if compareErr != nil {
 		proxy.WriteError(w, r, http.StatusUnauthorized, "invalid_credentials", "invalid_request_error", "Invalid email or password")
