@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/krishna/local-ai-proxy/internal/apierror"
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/authlimit"
 	"github.com/krishna/local-ai-proxy/internal/metrics"
@@ -133,8 +134,7 @@ func (h *handler) writeThrottled(w http.ResponseWriter, r *http.Request, retryAf
 
 func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Email == "" || req.Password == "" || req.Name == "" {
@@ -181,8 +181,7 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Email == "" || req.Password == "" {
@@ -295,8 +294,7 @@ func (h *handler) updateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req updateProfileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -328,8 +326,7 @@ func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req changePasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.OldPassword == "" || req.NewPassword == "" {
@@ -379,8 +376,7 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createKeyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -627,8 +623,7 @@ func (h *handler) registerServiceAccount(w http.ResponseWriter, r *http.Request)
 		Name      string `json:"name"`
 		RateLimit int    `json:"rate_limit"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Token == "" || req.Name == "" {

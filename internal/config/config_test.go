@@ -147,6 +147,43 @@ func TestLoad_InvalidMaxRequestBody(t *testing.T) {
 	}
 }
 
+func TestLoad_MaxJSONBodyDefaultAndCustom(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("MAX_JSON_REQUEST_BODY", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxJSONBody != 1048576 {
+		t.Errorf("MaxJSONBody = %d, want default 1048576", cfg.MaxJSONBody)
+	}
+
+	t.Setenv("MAX_JSON_REQUEST_BODY", "2097152")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxJSONBody != 2097152 {
+		t.Errorf("MaxJSONBody = %d, want 2097152", cfg.MaxJSONBody)
+	}
+}
+
+func TestLoad_MaxJSONBodyRejectsInvalid(t *testing.T) {
+	for _, bad := range []string{"not-a-number", "0", "-5"} {
+		t.Run(bad, func(t *testing.T) {
+			t.Setenv("ADMIN_KEY", "key")
+			t.Setenv("DATABASE_URL", "postgres://localhost/db")
+			t.Setenv("MAX_JSON_REQUEST_BODY", bad)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for MAX_JSON_REQUEST_BODY=%s", bad)
+			}
+		})
+	}
+}
+
 func TestLoad_AuthRateLimitDefaults(t *testing.T) {
 	t.Setenv("ADMIN_KEY", "key")
 	t.Setenv("DATABASE_URL", "postgres://localhost/db")

@@ -84,8 +84,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req bootstrapRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		apierror.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 

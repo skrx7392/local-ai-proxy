@@ -14,6 +14,7 @@ type Config struct {
 	Port                string
 	CORSOrigins         string
 	MaxRequestBody      int64
+	MaxJSONBody         int64
 	DefaultCreditGrant  float64
 	LogLevel            string
 
@@ -44,6 +45,20 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("invalid MAX_REQUEST_BODY: %w", err)
 		}
 		maxBody = n
+	}
+
+	// Cap for the JSON API endpoints (auth/users/accounts/admin). The chat
+	// proxy path keeps the larger MAX_REQUEST_BODY cap.
+	maxJSONBody := int64(1048576) // 1MB
+	if v := os.Getenv("MAX_JSON_REQUEST_BODY"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid MAX_JSON_REQUEST_BODY: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("invalid MAX_JSON_REQUEST_BODY: must be positive, got %d", n)
+		}
+		maxJSONBody = n
 	}
 
 	var defaultCreditGrant float64
@@ -84,6 +99,7 @@ func Load() (Config, error) {
 		Port:                envOrDefault("PORT", "8080"),
 		CORSOrigins:         envOrDefault("CORS_ORIGINS", "*"),
 		MaxRequestBody:      maxBody,
+		MaxJSONBody:         maxJSONBody,
 		DefaultCreditGrant:  defaultCreditGrant,
 		LogLevel:            envOrDefault("LOG_LEVEL", "info"),
 

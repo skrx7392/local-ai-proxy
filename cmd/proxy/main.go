@@ -183,6 +183,10 @@ func main() {
 	})
 	authLimit := authlimit.Middleware(authGuard, m)
 
+	// 1MB body cap for the JSON API mounts; the /api/v1/ proxy keeps its
+	// own 50MB cap (MAX_REQUEST_BODY).
+	jsonBody := middleware.MaxBody(cfg.MaxJSONBody)
+
 	hc := health.NewChecker(db, cfg.OllamaURL, func() int { return len(usageCh) }, cap(usageCh))
 	hc.SetOllamaGauge(m.OllamaUp)
 
@@ -191,6 +195,7 @@ func main() {
 		Port:                             cfg.Port,
 		LogLevel:                         cfg.LogLevel,
 		MaxRequestBodyBytes:              cfg.MaxRequestBody,
+		MaxJSONBodyBytes:                 cfg.MaxJSONBody,
 		DefaultCreditGrant:               cfg.DefaultCreditGrant,
 		CORSOrigins:                      cfg.CORSOrigins,
 		AdminRateLimitPerMinute:          admin.AdminKeyRateLimitPerMinute,
@@ -232,18 +237,19 @@ func main() {
 	// Admin bootstrap — mounted before the admin prefix so Go's ServeMux
 	// routes POST /api/admin/bootstrap outside the admin authMiddleware.
 	// Returns 404 unless ADMIN_BOOTSTRAP_TOKEN is set.
-	mux.Handle("POST /api/admin/bootstrap", bootstrapHandler)
+	mux.Handle("POST /api/admin/bootstrap", jsonBody(bootstrapHandler))
 
 	// Admin — no CORS
-	mux.Handle("/api/admin/", adminHandler)
+	mux.Handle("/api/admin/", jsonBody(adminHandler))
 
-	// User API — CORS, per-IP auth limits, session auth handled internally.
-	// authLimit sits inside cors so OPTIONS preflights don't consume tokens.
-	mux.Handle("/api/auth/", cors(authLimit(userHandler)))
-	mux.Handle("/api/users/", cors(authLimit(userHandler)))
+	// User API — CORS, per-IP auth limits, body cap, session auth handled
+	// internally. authLimit sits inside cors so OPTIONS preflights don't
+	// consume tokens.
+	mux.Handle("/api/auth/", cors(authLimit(jsonBody(userHandler))))
+	mux.Handle("/api/users/", cors(authLimit(jsonBody(userHandler))))
 
 	// Service account registration — CORS, public (token-gated internally)
-	mux.Handle("/api/accounts/", cors(authLimit(userHandler)))
+	mux.Handle("/api/accounts/", cors(authLimit(jsonBody(userHandler))))
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
