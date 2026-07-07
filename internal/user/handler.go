@@ -358,21 +358,19 @@ func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.UpdateUserPassword(user.ID, string(hash)); err != nil {
+	// The canonical reason to change a password is suspected compromise: a
+	// stolen session token must not survive it. Password update and session
+	// revocation are one transaction — on failure both roll back, so a 200
+	// always means every other session is dead. The session performing the
+	// change stays logged in (empty keep-hash purges all as a fallback).
+	keepHash := ""
+	if session := SessionFromContext(r.Context()); session != nil {
+		keepHash = session.TokenHash
+	}
+	if err := h.store.UpdateUserPasswordAndRevokeSessions(user.ID, string(hash), keepHash); err != nil {
 		slog.ErrorContext(r.Context(), "update password error", "error", err, "user_id", user.ID)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update password")
 		return
-	}
-
-	// The canonical reason to change a password is suspected compromise: a
-	// stolen session token must not survive it. Every other session dies;
-	// the session performing the change stays logged in.
-	if session := SessionFromContext(r.Context()); session != nil {
-		if err := h.store.DeleteUserSessionsExcept(user.ID, session.TokenHash); err != nil {
-			slog.ErrorContext(r.Context(), "revoke sessions after password change", "error", err, "user_id", user.ID)
-		}
-	} else if err := h.store.DeleteUserSessions(user.ID); err != nil {
-		slog.ErrorContext(r.Context(), "revoke sessions after password change", "error", err, "user_id", user.ID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
