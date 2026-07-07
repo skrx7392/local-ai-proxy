@@ -561,6 +561,17 @@ func (s *Store) DeactivateUserGuarded(id int64) error {
 		return fmt.Errorf("deactivate: %w", err)
 	}
 
+	// A deactivated user must lose access immediately, not keep riding
+	// existing sessions until they expire. Same transaction as the flag
+	// flip; skipped when the user was already inactive (no-op).
+	if currentActive {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM user_sessions WHERE user_id = $1`, id,
+		); err != nil {
+			return fmt.Errorf("purge sessions: %w", err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -626,6 +637,16 @@ func (s *Store) UpdateUserRoleGuarded(id int64, newRole string) error {
 		return fmt.Errorf("update role: %w", err)
 	}
 
+	// Any actual role change invalidates existing sessions: demotion forces
+	// a fresh login at the lower privilege, and promotion prevents a 7-day
+	// user session from outliving the 6-hour admin session policy. The
+	// no-op path returned above, so this only runs on real changes.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM user_sessions WHERE user_id = $1`, id,
+	); err != nil {
+		return fmt.Errorf("purge sessions: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -673,6 +694,18 @@ func (s *Store) DeleteUserSessions(userID int64) error {
 	_, err := s.pool.Exec(
 		context.Background(),
 		`DELETE FROM user_sessions WHERE user_id = $1`, userID,
+	)
+	return err
+}
+
+// DeleteUserSessionsExcept removes all of a user's sessions except the one
+// with the given token hash — typically the session performing a password
+// change, which should stay logged in while every other session dies.
+func (s *Store) DeleteUserSessionsExcept(userID int64, keepTokenHash string) error {
+	_, err := s.pool.Exec(
+		context.Background(),
+		`DELETE FROM user_sessions WHERE user_id = $1 AND token_hash <> $2`,
+		userID, keepTokenHash,
 	)
 	return err
 }

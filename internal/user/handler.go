@@ -364,6 +364,17 @@ func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The canonical reason to change a password is suspected compromise: a
+	// stolen session token must not survive it. Every other session dies;
+	// the session performing the change stays logged in.
+	if session := SessionFromContext(r.Context()); session != nil {
+		if err := h.store.DeleteUserSessionsExcept(user.ID, session.TokenHash); err != nil {
+			slog.ErrorContext(r.Context(), "revoke sessions after password change", "error", err, "user_id", user.ID)
+		}
+	} else if err := h.store.DeleteUserSessions(user.ID); err != nil {
+		slog.ErrorContext(r.Context(), "revoke sessions after password change", "error", err, "user_id", user.ID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "password_changed"})
 }
