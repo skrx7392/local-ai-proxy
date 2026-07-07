@@ -561,6 +561,17 @@ func (s *Store) DeactivateUserGuarded(id int64) error {
 		return fmt.Errorf("deactivate: %w", err)
 	}
 
+	// A deactivated user must lose access immediately, not keep riding
+	// existing sessions until they expire. Same transaction as the flag
+	// flip; skipped when the user was already inactive (no-op).
+	if currentActive {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM user_sessions WHERE user_id = $1`, id,
+		); err != nil {
+			return fmt.Errorf("purge sessions: %w", err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -626,6 +637,16 @@ func (s *Store) UpdateUserRoleGuarded(id int64, newRole string) error {
 		return fmt.Errorf("update role: %w", err)
 	}
 
+	// Any actual role change invalidates existing sessions: demotion forces
+	// a fresh login at the lower privilege, and promotion prevents a 7-day
+	// user session from outliving the 6-hour admin session policy. The
+	// no-op path returned above, so this only runs on real changes.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM user_sessions WHERE user_id = $1`, id,
+	); err != nil {
+		return fmt.Errorf("purge sessions: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
@@ -675,6 +696,56 @@ func (s *Store) DeleteUserSessions(userID int64) error {
 		`DELETE FROM user_sessions WHERE user_id = $1`, userID,
 	)
 	return err
+}
+
+// DeleteUserSessionsExcept removes all of a user's sessions except the one
+// with the given token hash. Store primitive for a future "log out all
+// devices" control; password changes use the transactional
+// UpdateUserPasswordAndRevokeSessions instead.
+func (s *Store) DeleteUserSessionsExcept(userID int64, keepTokenHash string) error {
+	_, err := s.pool.Exec(
+		context.Background(),
+		`DELETE FROM user_sessions WHERE user_id = $1 AND token_hash <> $2`,
+		userID, keepTokenHash,
+	)
+	return err
+}
+
+// UpdateUserPasswordAndRevokeSessions updates the password hash and deletes
+// every other session for the user in one transaction: a password change can
+// never report success while stale sessions remain usable, and a failed
+// revocation rolls the password change back rather than lying to the caller.
+// The session with keepTokenHash (the one performing the change) survives.
+func (s *Store) UpdateUserPasswordAndRevokeSessions(id int64, passwordHash, keepTokenHash string) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	ct, err := tx.Exec(ctx,
+		`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+		passwordHash, id,
+	)
+	if err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM user_sessions WHERE user_id = $1 AND token_hash <> $2`,
+		id, keepTokenHash,
+	); err != nil {
+		return fmt.Errorf("revoke sessions: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
 }
 
 // CreateKeyForUser creates an API key owned by a user.
