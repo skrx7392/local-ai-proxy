@@ -151,6 +151,11 @@ All configuration via environment variables:
 | `CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes |
 | `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `AUTH_RATELIMIT_LOGIN_PER_MIN` | `5` | Login attempts per minute per client IP |
+| `AUTH_RATELIMIT_LOGIN_EMAIL_PER_MIN` | `5` | Login attempts per minute per target email |
+| `AUTH_RATELIMIT_REGISTER_PER_MIN` | `3` | Registrations per minute per client IP (user + service) |
+| `AUTH_RATELIMIT_GENERAL_PER_MIN` | `120` | Other `/api/auth|users|accounts` requests per minute per IP |
+| `AUTH_BCRYPT_MAX_CONCURRENT` | `8` | Global cap on simultaneous bcrypt operations |
 
 ## Deployment
 

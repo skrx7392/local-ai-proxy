@@ -146,3 +146,73 @@ func TestLoad_InvalidMaxRequestBody(t *testing.T) {
 		t.Fatal("expected error for invalid MAX_REQUEST_BODY")
 	}
 }
+
+func TestLoad_AuthRateLimitDefaults(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("AUTH_RATELIMIT_LOGIN_PER_MIN", "")
+	t.Setenv("AUTH_RATELIMIT_LOGIN_EMAIL_PER_MIN", "")
+	t.Setenv("AUTH_RATELIMIT_REGISTER_PER_MIN", "")
+	t.Setenv("AUTH_RATELIMIT_GENERAL_PER_MIN", "")
+	t.Setenv("AUTH_BCRYPT_MAX_CONCURRENT", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthLoginPerMinIP != 5 {
+		t.Errorf("AuthLoginPerMinIP = %d, want default 5", cfg.AuthLoginPerMinIP)
+	}
+	if cfg.AuthLoginPerMinEmail != 5 {
+		t.Errorf("AuthLoginPerMinEmail = %d, want default 5", cfg.AuthLoginPerMinEmail)
+	}
+	if cfg.AuthRegisterPerMinIP != 3 {
+		t.Errorf("AuthRegisterPerMinIP = %d, want default 3", cfg.AuthRegisterPerMinIP)
+	}
+	if cfg.AuthGeneralPerMinIP != 120 {
+		t.Errorf("AuthGeneralPerMinIP = %d, want default 120", cfg.AuthGeneralPerMinIP)
+	}
+	if cfg.AuthBcryptConcurrency != 8 {
+		t.Errorf("AuthBcryptConcurrency = %d, want default 8", cfg.AuthBcryptConcurrency)
+	}
+}
+
+func TestLoad_AuthRateLimitCustomValues(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("AUTH_RATELIMIT_LOGIN_PER_MIN", "10")
+	t.Setenv("AUTH_RATELIMIT_LOGIN_EMAIL_PER_MIN", "7")
+	t.Setenv("AUTH_RATELIMIT_REGISTER_PER_MIN", "2")
+	t.Setenv("AUTH_RATELIMIT_GENERAL_PER_MIN", "300")
+	t.Setenv("AUTH_BCRYPT_MAX_CONCURRENT", "4")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuthLoginPerMinIP != 10 || cfg.AuthLoginPerMinEmail != 7 ||
+		cfg.AuthRegisterPerMinIP != 2 || cfg.AuthGeneralPerMinIP != 300 ||
+		cfg.AuthBcryptConcurrency != 4 {
+		t.Errorf("custom auth limits not applied: %+v", cfg)
+	}
+}
+
+func TestLoad_AuthRateLimitRejectsInvalid(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"AUTH_RATELIMIT_LOGIN_PER_MIN", "not-a-number"},
+		{"AUTH_RATELIMIT_LOGIN_EMAIL_PER_MIN", "0"},
+		{"AUTH_RATELIMIT_REGISTER_PER_MIN", "-3"},
+		{"AUTH_RATELIMIT_GENERAL_PER_MIN", "1.5"},
+		{"AUTH_BCRYPT_MAX_CONCURRENT", "0"},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			t.Setenv("ADMIN_KEY", "key")
+			t.Setenv("DATABASE_URL", "postgres://localhost/db")
+			t.Setenv(tc.key, tc.value)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for %s=%s", tc.key, tc.value)
+			}
+		})
+	}
+}

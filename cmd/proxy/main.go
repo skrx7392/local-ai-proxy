@@ -15,6 +15,7 @@ import (
 
 	"github.com/krishna/local-ai-proxy/internal/admin"
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/authlimit"
 	"github.com/krishna/local-ai-proxy/internal/bootstrap"
 	"github.com/krishna/local-ai-proxy/internal/config"
 	"github.com/krishna/local-ai-proxy/internal/credits"
@@ -172,23 +173,38 @@ func main() {
 	rateLimitMiddleware := ratelimit.Middleware(limiter, m)
 	cors := middleware.CORS(cfg.CORSOrigins)
 
+	// Brute-force / bcrypt-DoS protection for the public auth surface.
+	authGuard := authlimit.New(authlimit.Config{
+		LoginPerMinIP:     cfg.AuthLoginPerMinIP,
+		LoginPerMinEmail:  cfg.AuthLoginPerMinEmail,
+		RegisterPerMinIP:  cfg.AuthRegisterPerMinIP,
+		GeneralPerMinIP:   cfg.AuthGeneralPerMinIP,
+		BcryptConcurrency: cfg.AuthBcryptConcurrency,
+	})
+	authLimit := authlimit.Middleware(authGuard, m)
+
 	hc := health.NewChecker(db, cfg.OllamaURL, func() int { return len(usageCh) }, cap(usageCh))
 	hc.SetOllamaGauge(m.OllamaUp)
 
 	configSnapshot := admin.ConfigSnapshot{
-		OllamaURL:               cfg.OllamaURL,
-		Port:                    cfg.Port,
-		LogLevel:                cfg.LogLevel,
-		MaxRequestBodyBytes:     cfg.MaxRequestBody,
-		DefaultCreditGrant:      cfg.DefaultCreditGrant,
-		CORSOrigins:             cfg.CORSOrigins,
-		AdminRateLimitPerMinute: admin.AdminKeyRateLimitPerMinute,
-		UsageChannelCapacity:    usageChannelCapacity,
-		AdminSessionDurationHrs: int(user.AdminSessionDuration / time.Hour),
-		UserSessionDurationHrs:  int(user.UserSessionDuration / time.Hour),
-		Version:                 version,
-		BuildTime:               buildTime,
-		GoVersion:               runtime.Version(),
+		OllamaURL:                        cfg.OllamaURL,
+		Port:                             cfg.Port,
+		LogLevel:                         cfg.LogLevel,
+		MaxRequestBodyBytes:              cfg.MaxRequestBody,
+		DefaultCreditGrant:               cfg.DefaultCreditGrant,
+		CORSOrigins:                      cfg.CORSOrigins,
+		AdminRateLimitPerMinute:          admin.AdminKeyRateLimitPerMinute,
+		AuthLoginRateLimitPerMinute:      cfg.AuthLoginPerMinIP,
+		AuthLoginEmailRateLimitPerMinute: cfg.AuthLoginPerMinEmail,
+		AuthRegisterRateLimitPerMinute:   cfg.AuthRegisterPerMinIP,
+		AuthGeneralRateLimitPerMinute:    cfg.AuthGeneralPerMinIP,
+		AuthBcryptMaxConcurrent:          cfg.AuthBcryptConcurrency,
+		UsageChannelCapacity:             usageChannelCapacity,
+		AdminSessionDurationHrs:          int(user.AdminSessionDuration / time.Hour),
+		UserSessionDurationHrs:           int(user.UserSessionDuration / time.Hour),
+		Version:                          version,
+		BuildTime:                        buildTime,
+		GoVersion:                        runtime.Version(),
 	}
 
 	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh, admin.Options{
@@ -198,7 +214,7 @@ func main() {
 		Metrics:   m,
 	})
 	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken, m)
-	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant, m)
+	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant, m, authGuard)
 
 	mux := http.NewServeMux()
 
@@ -221,12 +237,13 @@ func main() {
 	// Admin — no CORS
 	mux.Handle("/api/admin/", adminHandler)
 
-	// User API — CORS, session auth handled internally
-	mux.Handle("/api/auth/", cors(userHandler))
-	mux.Handle("/api/users/", cors(userHandler))
+	// User API — CORS, per-IP auth limits, session auth handled internally.
+	// authLimit sits inside cors so OPTIONS preflights don't consume tokens.
+	mux.Handle("/api/auth/", cors(authLimit(userHandler)))
+	mux.Handle("/api/users/", cors(authLimit(userHandler)))
 
 	// Service account registration — CORS, public (token-gated internally)
-	mux.Handle("/api/accounts/", cors(userHandler))
+	mux.Handle("/api/accounts/", cors(authLimit(userHandler)))
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
