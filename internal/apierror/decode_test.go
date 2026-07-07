@@ -82,6 +82,63 @@ func TestDecodeJSON_OversizedBodyWrites413(t *testing.T) {
 	}
 }
 
+func TestDecodeJSON_TrailingSecondValueWrites400(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"name":"a"}{"name":"b"}`))
+	rec := httptest.NewRecorder()
+
+	var dst testPayload
+	if DecodeJSON(rec, req, &dst) {
+		t.Fatal("DecodeJSON = true for body with a second JSON value")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDecodeJSON_TrailingGarbageWrites400(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"name":"a"} not-json`))
+	rec := httptest.NewRecorder()
+
+	var dst testPayload
+	if DecodeJSON(rec, req, &dst) {
+		t.Fatal("DecodeJSON = true for body with trailing garbage")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDecodeJSON_SmallValueWithOversizedPaddingWrites413(t *testing.T) {
+	// A tiny valid document followed by padding that exceeds the cap must
+	// not slip past the limit: the EOF check has to read (and trip) the
+	// MaxBytesReader.
+	body := `{"name":"a"}` + strings.Repeat(" ", 256)
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	req.Body = http.MaxBytesReader(rec, req.Body, 32)
+
+	var dst testPayload
+	if DecodeJSON(rec, req, &dst) {
+		t.Fatal("DecodeJSON = true for oversized padded body")
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
+	}
+}
+
+func TestDecodeJSON_TrailingWhitespaceStillSucceeds(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader("{\"name\":\"ok\"}\n  \t\n"))
+	rec := httptest.NewRecorder()
+
+	var dst testPayload
+	if !DecodeJSON(rec, req, &dst) {
+		t.Fatalf("DecodeJSON = false for body with trailing whitespace, response: %s", rec.Body.String())
+	}
+	if dst.Name != "ok" {
+		t.Errorf("decoded Name = %q, want ok", dst.Name)
+	}
+}
+
 func TestDecodeJSON_EmptyBodyWrites400(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(""))
 	rec := httptest.NewRecorder()
