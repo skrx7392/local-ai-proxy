@@ -52,6 +52,44 @@ func TestDeleteUserSessionsExcept_KeepsOnlyGivenSession(t *testing.T) {
 	}
 }
 
+func TestUpdatePasswordAndRevokeSessions_Atomic(t *testing.T) {
+	s := setupTestStore(t)
+
+	uid, err := s.CreateUser("atomic@example.com", "old-hash", "Atomic")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	createTestSession(t, s, uid, "hash-current")
+	createTestSession(t, s, uid, "hash-stale")
+
+	if err := s.UpdateUserPasswordAndRevokeSessions(uid, "new-hash", "hash-current"); err != nil {
+		t.Fatalf("UpdateUserPasswordAndRevokeSessions: %v", err)
+	}
+
+	u, err := s.GetUserByID(uid)
+	if err != nil || u == nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if u.PasswordHash != "new-hash" {
+		t.Errorf("PasswordHash = %q, want new-hash", u.PasswordHash)
+	}
+	if !sessionExists(t, s, "hash-current") {
+		t.Error("current session must survive")
+	}
+	if sessionExists(t, s, "hash-stale") {
+		t.Error("stale session must be revoked in the same transaction")
+	}
+}
+
+func TestUpdatePasswordAndRevokeSessions_UnknownUser(t *testing.T) {
+	s := setupTestStore(t)
+
+	err := s.UpdateUserPasswordAndRevokeSessions(99999, "h", "keep")
+	if err == nil {
+		t.Fatal("expected error for unknown user")
+	}
+}
+
 func TestDeactivateUserGuarded_PurgesSessions(t *testing.T) {
 	s := setupTestStore(t)
 
