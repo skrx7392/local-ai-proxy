@@ -17,6 +17,7 @@ type ConfigSnapshot struct {
 	Port                             string  `json:"port"`
 	LogLevel                         string  `json:"log_level"`
 	MaxRequestBodyBytes              int64   `json:"max_request_body_bytes"`
+	MaxJSONBodyBytes                 int64   `json:"max_json_request_body_bytes"`
 	DefaultCreditGrant               float64 `json:"default_credit_grant"`
 	CORSOrigins                      string  `json:"cors_origins"`
 	AdminRateLimitPerMinute          int     `json:"admin_rate_limit_per_minute"`

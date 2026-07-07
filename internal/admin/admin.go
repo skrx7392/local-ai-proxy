@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/krishna/local-ai-proxy/internal/apierror"
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/health"
 	"github.com/krishna/local-ai-proxy/internal/metrics"
@@ -258,8 +259,7 @@ func (h *handler) adminAllow() bool {
 
 func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 	var req createKeyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -627,8 +627,7 @@ func (h *handler) grantCredits(w http.ResponseWriter, r *http.Request) {
 		Amount      float64 `json:"amount"`
 		Description string  `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Amount == 0 {
@@ -659,8 +658,7 @@ func (h *handler) createAccountKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createKeyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -711,8 +709,7 @@ func (h *handler) createRegistrationToken(w http.ResponseWriter, r *http.Request
 		MaxUses     int     `json:"max_uses"`
 		ExpiresAt   *string `json:"expires_at"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -890,8 +887,7 @@ func (h *handler) upsertPricing(w http.ResponseWriter, r *http.Request) {
 		CompletionRate    float64 `json:"completion_rate"`
 		TypicalCompletion int     `json:"typical_completion"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.ModelID == "" {
@@ -949,8 +945,7 @@ func (h *handler) setSessionLimit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Limit *int `json:"limit"` // null = remove limit
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -1032,8 +1027,7 @@ func (h *handler) updateUserRole(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Role string `json:"role"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -1126,8 +1120,7 @@ func (h *handler) updateKeyRateLimit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RateLimit *int `json:"rate_limit"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
 	if req.RateLimit == nil {

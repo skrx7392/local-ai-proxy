@@ -149,7 +149,8 @@ All configuration via environment variables:
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama backend URL |
 | `PORT` | `8080` | Server listen port |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins |
-| `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes |
+| `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes (chat proxy path) |
+| `MAX_JSON_REQUEST_BODY` | `1048576` (1MB) | Max body size for JSON API endpoints (auth/users/accounts/admin) |
 | `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `AUTH_RATELIMIT_LOGIN_PER_MIN` | `5` | Login attempts per minute per client IP |
 | `AUTH_RATELIMIT_LOGIN_EMAIL_PER_MIN` | `5` | Login attempts per minute per target email |
