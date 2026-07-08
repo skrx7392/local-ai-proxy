@@ -64,8 +64,9 @@ Every key is credit-backed — including admin-created ones — so the model you
 want to chat with must be **priced** first:
 
 ```bash
+# Rates are credits per MILLION tokens (1000/MTok = 0.001 credits per token).
 curl -s -X POST -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
-  -d '{"model_id":"smollm2:135m","prompt_rate":0.001,"completion_rate":0.001,"typical_completion":300}' \
+  -d '{"model_id":"smollm2:135m","prompt_rate_per_mtok":1000,"completion_rate_per_mtok":1000,"typical_completion":300}' \
   http://localhost:18080/api/admin/pricing
 ```
 

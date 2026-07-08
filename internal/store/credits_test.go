@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"math"
 	"sync"
 	"testing"
@@ -442,7 +443,8 @@ func TestCleanupSettledHolds(t *testing.T) {
 func TestUpsertAndGetPricing(t *testing.T) {
 	s := setupTestStore(t)
 
-	if err := s.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500); err != nil {
+	// Rates are credits per MILLION tokens (2000/MTok = old 0.002/token).
+	if err := s.UpsertPricing("llama3.1:8b", 2000, 2000, 500); err != nil {
 		t.Fatalf("UpsertPricing: %v", err)
 	}
 
@@ -453,11 +455,25 @@ func TestUpsertAndGetPricing(t *testing.T) {
 	if p == nil {
 		t.Fatal("expected pricing, got nil")
 	}
-	if !almostEqual(p.PromptRate, 0.002) {
-		t.Errorf("expected prompt_rate 0.002, got %f", p.PromptRate)
+	if !almostEqual(p.PromptRatePerMTok, 2000) {
+		t.Errorf("expected prompt_rate_per_mtok 2000, got %f", p.PromptRatePerMTok)
 	}
 	if p.TypicalCompletion != 500 {
 		t.Errorf("expected typical_completion 500, got %d", p.TypicalCompletion)
+	}
+
+	// The deprecated per-token columns must be kept in sync (= mtok / 1e6)
+	// so a rolled-back binary still reads correct prices until the columns
+	// are dropped in a later release.
+	var legacyPrompt, legacyCompletion float64
+	err = s.Pool().QueryRow(context.Background(),
+		`SELECT prompt_rate, completion_rate FROM credit_pricing WHERE model_id = 'llama3.1:8b'`,
+	).Scan(&legacyPrompt, &legacyCompletion)
+	if err != nil {
+		t.Fatalf("read legacy columns: %v", err)
+	}
+	if !almostEqual(legacyPrompt, 0.002) || !almostEqual(legacyCompletion, 0.002) {
+		t.Errorf("legacy per-token columns = %f/%f, want 0.002/0.002 (kept in sync)", legacyPrompt, legacyCompletion)
 	}
 }
 
@@ -476,8 +492,8 @@ func TestGetPricingByModel_NotFound(t *testing.T) {
 func TestListActivePricing(t *testing.T) {
 	s := setupTestStore(t)
 
-	_ = s.UpsertPricing("model-a", 0.001, 0.001, 300)
-	_ = s.UpsertPricing("model-b", 0.002, 0.002, 500)
+	_ = s.UpsertPricing("model-a", 1000, 1000, 300)
+	_ = s.UpsertPricing("model-b", 2000, 2000, 500)
 
 	pricing, err := s.ListActivePricing()
 	if err != nil {
@@ -491,7 +507,7 @@ func TestListActivePricing(t *testing.T) {
 func TestDeletePricing(t *testing.T) {
 	s := setupTestStore(t)
 
-	_ = s.UpsertPricing("delete-me", 0.001, 0.001, 300)
+	_ = s.UpsertPricing("delete-me", 1000, 1000, 300)
 	p, _ := s.GetPricingByModel("delete-me")
 
 	if err := s.DeletePricing(p.ID); err != nil {
@@ -507,19 +523,19 @@ func TestDeletePricing(t *testing.T) {
 func TestUpsertPricing_Reactivates(t *testing.T) {
 	s := setupTestStore(t)
 
-	_ = s.UpsertPricing("reactivate", 0.001, 0.001, 300)
+	_ = s.UpsertPricing("reactivate", 1000, 1000, 300)
 	p, _ := s.GetPricingByModel("reactivate")
 	_ = s.DeletePricing(p.ID)
 
 	// Upsert should reactivate
-	_ = s.UpsertPricing("reactivate", 0.003, 0.003, 600)
+	_ = s.UpsertPricing("reactivate", 3000, 3000, 600)
 
 	p2, _ := s.GetPricingByModel("reactivate")
 	if p2 == nil {
 		t.Fatal("expected pricing to be reactivated")
 	}
-	if !almostEqual(p2.PromptRate, 0.003) {
-		t.Errorf("expected updated prompt_rate 0.003, got %f", p2.PromptRate)
+	if !almostEqual(p2.PromptRatePerMTok, 3000) {
+		t.Errorf("expected updated prompt_rate_per_mtok 3000, got %f", p2.PromptRatePerMTok)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -333,7 +334,7 @@ func TestAdmin_RevokeRegistrationToken_InvalidID(t *testing.T) {
 func TestAdmin_UpsertListDeletePricing(t *testing.T) {
 	h, _ := setupAdminTest(t)
 
-	upsert := `{"model_id":"llama3","prompt_rate":0.001,"completion_rate":0.002,"typical_completion":200}`
+	upsert := `{"model_id":"llama3","prompt_rate_per_mtok":1000,"completion_rate_per_mtok":2000,"typical_completion":200}`
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/pricing", bytes.NewBufferString(upsert))
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -369,7 +370,7 @@ func TestAdmin_UpsertListDeletePricing(t *testing.T) {
 
 func TestAdmin_UpsertPricing_MissingModelID(t *testing.T) {
 	h, _ := setupAdminTest(t)
-	body := `{"prompt_rate":0.001,"completion_rate":0.002}`
+	body := `{"prompt_rate_per_mtok":1000,"completion_rate_per_mtok":2000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/pricing", bytes.NewBufferString(body))
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -382,7 +383,7 @@ func TestAdmin_UpsertPricing_MissingModelID(t *testing.T) {
 
 func TestAdmin_UpsertPricing_InvalidRates(t *testing.T) {
 	h, _ := setupAdminTest(t)
-	body := `{"model_id":"x","prompt_rate":0,"completion_rate":0.001}`
+	body := `{"model_id":"x","prompt_rate_per_mtok":0,"completion_rate_per_mtok":1000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/pricing", bytes.NewBufferString(body))
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -390,6 +391,26 @@ func TestAdmin_UpsertPricing_InvalidRates(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+// TestAdmin_UpsertPricing_OldPerTokenFieldNames400 pins the re-denomination
+// break: the pre-per-MTok field names (prompt_rate / completion_rate,
+// credits per TOKEN) — and any other unknown field — must be rejected with a
+// 400 naming the field, never silently ignored and misinterpreted.
+func TestAdmin_UpsertPricing_OldPerTokenFieldNames400(t *testing.T) {
+	h, _ := setupAdminTest(t)
+	body := `{"model_id":"x","prompt_rate":0.002,"completion_rate":0.002}`
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/pricing", bytes.NewBufferString(body))
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for old per-token field names, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "prompt_rate") {
+		t.Errorf("expected error to name the offending field, got: %s", rec.Body.String())
 	}
 }
 
@@ -666,7 +687,7 @@ func TestAdmin_Internal_ListPricing(t *testing.T) {
 }
 func TestAdmin_Internal_UpsertPricing(t *testing.T) {
 	withBrokenStore(t, func(h http.Handler, _ *store.Store, _, _, _ int64) {
-		expect5xx(t, h, http.MethodPost, "/api/admin/pricing", `{"model_id":"m","prompt_rate":0.001,"completion_rate":0.001}`)
+		expect5xx(t, h, http.MethodPost, "/api/admin/pricing", `{"model_id":"m","prompt_rate_per_mtok":1000,"completion_rate_per_mtok":1000}`)
 	})
 }
 func TestAdmin_Internal_SetSessionLimit(t *testing.T) {

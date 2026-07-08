@@ -3,8 +3,10 @@ package apierror
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // DecodeJSON decodes the request body into dst and requires it to be a
@@ -13,7 +15,23 @@ import (
 // 400 for anything else — and returns false, in which case the handler must
 // return without writing a response.
 func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return decodeJSON(w, r, dst, false)
+}
+
+// DecodeJSONStrict behaves like DecodeJSON but additionally rejects unknown
+// fields with a 400 that names the offending field. Use it on endpoints
+// where a silently dropped field would change semantics — e.g. the pricing
+// endpoint after the per-token → per-MTok rate re-denomination, where the
+// old field names must fail loudly instead of being ignored.
+func DecodeJSONStrict(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return decodeJSON(w, r, dst, true)
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, strict bool) bool {
 	dec := json.NewDecoder(r.Body)
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(dst); err != nil {
 		writeDecodeError(w, r, err)
 		return false
@@ -41,5 +59,21 @@ func writeDecodeError(w http.ResponseWriter, r *http.Request, err error) {
 		WriteError(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "invalid_request_error", "Request body too large")
 		return
 	}
+	if field, ok := unknownField(err); ok {
+		WriteError(w, r, http.StatusBadRequest, "unknown_field", "invalid_request_error",
+			fmt.Sprintf("Unknown field %s", field))
+		return
+	}
 	WriteError(w, r, http.StatusBadRequest, "invalid_json", "invalid_request_error", "Invalid JSON body")
+}
+
+// unknownField extracts the field name (with quotes) from encoding/json's
+// unknown-field error. The stdlib exposes no typed error for it, so match
+// the stable message prefix.
+func unknownField(err error) (string, bool) {
+	const prefix = `json: unknown field `
+	if msg := err.Error(); strings.HasPrefix(msg, prefix) {
+		return strings.TrimPrefix(msg, prefix), true
+	}
+	return "", false
 }

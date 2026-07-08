@@ -359,8 +359,8 @@ func TestListAccounts_InvalidType_400(t *testing.T) {
 
 func TestListPricing_LegacyShape(t *testing.T) {
 	h, s := setupAdminTest(t)
-	_ = s.UpsertPricing("m1", 0.001, 0.002, 500)
-	_ = s.UpsertPricing("m2", 0.003, 0.004, 500)
+	_ = s.UpsertPricing("m1", 1000, 2000, 500)
+	_ = s.UpsertPricing("m2", 3000, 4000, 500)
 
 	rec := doAdminGET(t, h, "/api/admin/pricing?envelope=0")
 	if rec.Code != http.StatusOK {
@@ -381,9 +381,9 @@ func TestListPricing_LegacyShape(t *testing.T) {
 
 func TestListPricing_Envelope_Pagination(t *testing.T) {
 	h, s := setupAdminTest(t)
-	_ = s.UpsertPricing("m1", 0.001, 0.002, 500)
-	_ = s.UpsertPricing("m2", 0.003, 0.004, 500)
-	_ = s.UpsertPricing("m3", 0.005, 0.006, 500)
+	_ = s.UpsertPricing("m1", 1000, 2000, 500)
+	_ = s.UpsertPricing("m2", 3000, 4000, 500)
+	_ = s.UpsertPricing("m3", 5000, 6000, 500)
 
 	rec := doAdminGET(t, h, "/api/admin/pricing?envelope=1&limit=2&offset=0")
 	if rec.Code != http.StatusOK {
@@ -401,13 +401,15 @@ func TestListPricing_Envelope_Pagination(t *testing.T) {
 
 func assertPricingSnakeCaseKeys(t *testing.T, row map[string]any) {
 	t.Helper()
-	want := []string{"id", "model_id", "prompt_rate", "completion_rate", "typical_completion", "effective_from", "active"}
+	want := []string{"id", "model_id", "prompt_rate_per_mtok", "completion_rate_per_mtok", "typical_completion", "effective_from", "active"}
 	for _, k := range want {
 		if _, ok := row[k]; !ok {
 			t.Errorf("missing snake_case key %q in pricing row: %+v", k, row)
 		}
 	}
-	forbidden := []string{"ID", "ModelID", "PromptRate", "CompletionRate", "TypicalCompletion", "EffectiveFrom", "Active"}
+	// prompt_rate / completion_rate are the pre-per-MTok (credits per token)
+	// names — they must never reappear on the wire.
+	forbidden := []string{"prompt_rate", "completion_rate", "ID", "ModelID", "PromptRatePerMTok", "CompletionRatePerMTok", "TypicalCompletion", "EffectiveFrom", "Active"}
 	for _, k := range forbidden {
 		if _, ok := row[k]; ok {
 			t.Errorf("PascalCase key %q leaked into pricing wire shape: %+v", k, row)

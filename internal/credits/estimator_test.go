@@ -68,10 +68,11 @@ func TestEstimateCompletionTokens_Cascade(t *testing.T) {
 }
 
 func TestEstimateCost(t *testing.T) {
-	pricing := &store.CreditPricing{PromptRate: 0.002, CompletionRate: 0.002}
+	// Rates are credits per MILLION tokens: cost = tokens × rate / 1e6.
+	pricing := &store.CreditPricing{PromptRatePerMTok: 2000, CompletionRatePerMTok: 2000}
 
 	cost := EstimateCost(pricing, 100, 200)
-	expected := 100*0.002 + 200*0.002 // 0.6
+	expected := (100*2000 + 200*2000) / 1e6 // 0.6
 	if !almostEqual(cost, expected) {
 		t.Errorf("EstimateCost = %f, want %f", cost, expected)
 	}

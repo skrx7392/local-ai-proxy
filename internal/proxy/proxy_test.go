@@ -1488,8 +1488,8 @@ func listModels(t *testing.T, h http.Handler) map[string]string {
 
 func TestModels_IntersectionWithHealthyNodes(t *testing.T) {
 	db := setupTestDB(t)
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
-	_ = db.UpsertPricing("qwen2.5-coder:7b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
+	_ = db.UpsertPricing("qwen2.5-coder:7b", 2000, 2000, 500)
 
 	// Only llama3.1:8b is served by a healthy node.
 	reg := testRegistry(t, testNode{ID: 1, Name: "m5-max", URL: "http://n1:11434", Models: []string{"llama3.1:8b"}})
@@ -1507,7 +1507,7 @@ func TestModels_IntersectionWithHealthyNodes(t *testing.T) {
 
 func TestModels_OwnedByMultiple(t *testing.T) {
 	db := setupTestDB(t)
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	reg := testRegistry(t,
 		testNode{ID: 1, Name: "n1", URL: "http://n1:11434", Models: []string{"llama3.1:8b"}},
@@ -1524,8 +1524,8 @@ func TestModels_OwnedByMultiple(t *testing.T) {
 
 func TestModels_ListAllIncludesUnavailable(t *testing.T) {
 	db := setupTestDB(t)
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
-	_ = db.UpsertPricing("qwen2.5-coder:7b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
+	_ = db.UpsertPricing("qwen2.5-coder:7b", 2000, 2000, 500)
 
 	reg := testRegistry(t, testNode{ID: 1, Name: "n1", URL: "http://n1:11434", Models: []string{"llama3.1:8b"}})
 	usageCh := make(chan store.UsageEntry, 10)
@@ -1545,7 +1545,7 @@ func TestModels_ListAllIncludesUnavailable(t *testing.T) {
 
 func TestModels_UnhealthyNodeExcluded(t *testing.T) {
 	db := setupTestDB(t)
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	reg := testRegistry(t, testNode{ID: 1, Name: "n1", URL: "http://n1:11434", Models: []string{"llama3.1:8b"}, Unhealthy: true})
 	usageCh := make(chan store.UsageEntry, 10)
@@ -1563,7 +1563,7 @@ func TestCreditIntegration_UnknownModel_Returns400(t *testing.T) {
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("model-test@example.com", "hash", "ModelTest")
 	_ = db.AddCredits(accID, 1000, "grant")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	upstream := mockOllamaChatNonStreaming(http.StatusOK, map[string]any{"id": "test"})
 	defer upstream.Close()
@@ -1592,7 +1592,7 @@ func TestCreditIntegration_ModelUnavailable_NoHoldCreated(t *testing.T) {
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("unavail-test@example.com", "hash", "UnavailTest")
 	_ = db.AddCredits(accID, 1000, "grant")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	// The model is priced but NO healthy node serves it.
 	usageCh := make(chan store.UsageEntry, 10)
@@ -1631,7 +1631,7 @@ func TestCreditIntegration_ModelUnavailable_NoHoldCreated(t *testing.T) {
 func TestCreditIntegration_InsufficientCredits_Returns402(t *testing.T) {
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("insuff-test@example.com", "hash", "InsuffTest")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	upstream := mockOllamaChatNonStreaming(http.StatusOK, map[string]any{"id": "test"})
 	defer upstream.Close()
@@ -1657,7 +1657,7 @@ func TestCreditIntegration_SettlesAfterResponse(t *testing.T) {
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("settle-test@example.com", "hash", "SettleTest")
 	_ = db.AddCredits(accID, 1000, "grant")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	ollamaResp := map[string]any{
 		"id": "chatcmpl-123", "object": "chat.completion", "model": "llama3.1:8b",
@@ -1753,7 +1753,7 @@ func TestCreditIntegration_UpstreamError_ReleasesHold(t *testing.T) {
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("release-test@example.com", "hash", "ReleaseTest")
 	_ = db.AddCredits(accID, 1000, "grant")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	upstream := mockOllamaChatNonStreaming(http.StatusInternalServerError, map[string]any{"error": "internal error"})
 	defer upstream.Close()
@@ -1778,8 +1778,8 @@ func TestCreditIntegration_UpstreamError_ReleasesHold(t *testing.T) {
 
 func TestCreditIntegration_Models_WithDB(t *testing.T) {
 	db := setupTestDB(t)
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
-	_ = db.UpsertPricing("qwen2.5-coder:7b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
+	_ = db.UpsertPricing("qwen2.5-coder:7b", 2000, 2000, 500)
 
 	// Both priced models are served by a healthy node, so both appear.
 	reg := testRegistry(t, testNode{ID: 1, Name: "n1", URL: "http://localhost:11434", Models: []string{"llama3.1:8b", "qwen2.5-coder:7b"}})
@@ -1796,7 +1796,7 @@ func TestCreditIntegration_SessionLimit_Returns429(t *testing.T) {
 	db := setupTestDB(t)
 	accID, userID, _ := db.RegisterUser("session-limit@example.com", "hash", "SessLimit")
 	_ = db.AddCredits(accID, 10000, "grant")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	keyID, _ := db.CreateKeyForAccount(userID, accID, "limited-key", "hash-limited", "sk-lim00", 60)
 
@@ -1830,7 +1830,7 @@ func TestCreditIntegration_NonStreaming_NoUsageTokens_EstimatesFromBody(t *testi
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("estimate-body@example.com", "hash", "EstBody")
 	_ = db.AddCredits(accID, 1000, "grant")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	// Response without usage data — tokens will be estimated from body size
 	ollamaResp := map[string]any{
@@ -1867,7 +1867,7 @@ func TestCreditIntegration_WithMaxTokens(t *testing.T) {
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("maxtok@example.com", "hash", "MaxTok")
 	_ = db.AddCredits(accID, 1000, "grant")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	ollamaResp := map[string]any{
 		"id": "chatcmpl-mt", "object": "chat.completion", "model": "llama3.1:8b",
@@ -1899,7 +1899,7 @@ func TestCreditIntegration_StreamingSettlement(t *testing.T) {
 	db := setupTestDB(t)
 	accID, _, _ := db.RegisterUser("stream-credit@example.com", "hash", "StreamCredit")
 	_ = db.AddCredits(accID, 1000, "grant")
-	_ = db.UpsertPricing("llama3.1:8b", 0.002, 0.002, 500)
+	_ = db.UpsertPricing("llama3.1:8b", 2000, 2000, 500)
 
 	upstream := mockOllamaChatStreaming()
 	defer upstream.Close()

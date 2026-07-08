@@ -44,7 +44,7 @@ func TestWarnIfPricingEmpty_EmptyCatalogWarns(t *testing.T) {
 func TestWarnIfPricingEmpty_PricedCatalogSilent(t *testing.T) {
 	s := setupTestStore(t)
 
-	if err := s.UpsertPricing("test-model:1b", 0.001, 0.001, 300); err != nil {
+	if err := s.UpsertPricing("test-model:1b", 1000, 1000, 300); err != nil {
 		t.Fatalf("UpsertPricing: %v", err)
 	}
 

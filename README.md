@@ -85,7 +85,7 @@ Readiness = DB ok **and** usage writer ok **and** (*zero enabled nodes* **or** *
 | `GET` | `/api/admin/accounts` | List accounts (credit balances) |
 | `POST` | `/api/admin/accounts/{id}/credits` | Grant credits |
 | `POST` | `/api/admin/accounts/{id}/keys` | Create a key bound to an account |
-| `GET`/`POST` | `/api/admin/pricing` | List / upsert model pricing (`{model_id, prompt_rate, completion_rate, typical_completion}`) |
+| `GET`/`POST` | `/api/admin/pricing` | List / upsert model pricing (`{model_id, prompt_rate_per_mtok, completion_rate_per_mtok, typical_completion}`) |
 | `DELETE` | `/api/admin/pricing/{id}` | Deactivate pricing |
 | `GET`/`POST`/`DELETE` | `/api/admin/registration-tokens` | Manage service-registration tokens |
 | `GET` | `/api/admin/registrations` | Registration audit feed |
@@ -166,12 +166,13 @@ Nodes come from two coexisting sources: a static JSON file (`NODES_FILE`, the co
 The pricing catalog starts **empty** — nothing is seeded. `GET /api/v1/models` lists the intersection of *actively priced* models and models *served by a healthy node*, so after registering nodes you must price each model you want to expose (the gateway logs a warn-level reminder at startup while the catalog is empty):
 
 ```bash
+# Rates are credits per MILLION tokens (2000/MTok below = 0.002 credits per token).
 curl -s -X POST -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
-  -d '{"model_id":"llama3.1:8b","prompt_rate":0.002,"completion_rate":0.002,"typical_completion":500}' \
+  -d '{"model_id":"llama3.1:8b","prompt_rate_per_mtok":2000,"completion_rate_per_mtok":2000,"typical_completion":500}' \
   http://localhost:8080/api/admin/pricing
 ```
 
-Pricing is also **required** for any credit-backed key (keys created for user or service accounts): requests for unpriced models are rejected with `400 unknown_model`. Rates are in credits per token; `typical_completion` feeds the completion-token estimate that sizes per-request credit holds when the client sends no `max_tokens` and the account has little usage history.
+Pricing is also **required** for any credit-backed key (keys created for user or service accounts): requests for unpriced models are rejected with `400 unknown_model`. Rates are in credits per **million** tokens (per-MTok, the industry convention; the old per-token field names `prompt_rate`/`completion_rate` are rejected with `400 unknown_field`); `typical_completion` feeds the completion-token estimate that sizes per-request credit holds when the client sends no `max_tokens` and the account has little usage history.
 
 ## Request Flow
 

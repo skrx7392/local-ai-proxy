@@ -308,14 +308,20 @@ func (s *Store) GetCreditTransactions(accountID int64, limit, offset int) ([]Cre
 	return txns, rows.Err()
 }
 
-// GetPricingByModel returns pricing for a specific model ID.
+// GetPricingByModel returns pricing for a specific model ID. Rates are
+// credits per million tokens. The COALESCE covers rows written by a
+// pre-per-MTok binary that the boot-time backfill has not converted yet
+// (mixed-version rollout window).
 func (s *Store) GetPricingByModel(modelID string) (*CreditPricing, error) {
 	var p CreditPricing
 	err := s.pool.QueryRow(
 		context.Background(),
-		`SELECT id, model_id, prompt_rate, completion_rate, typical_completion, effective_from, active
+		`SELECT id, model_id,
+		        COALESCE(prompt_rate_mtok, prompt_rate * 1000000),
+		        COALESCE(completion_rate_mtok, completion_rate * 1000000),
+		        typical_completion, effective_from, active
 		 FROM credit_pricing WHERE model_id = $1 AND active = TRUE`, modelID,
-	).Scan(&p.ID, &p.ModelID, &p.PromptRate, &p.CompletionRate, &p.TypicalCompletion, &p.EffectiveFrom, &p.Active)
+	).Scan(&p.ID, &p.ModelID, &p.PromptRatePerMTok, &p.CompletionRatePerMTok, &p.TypicalCompletion, &p.EffectiveFrom, &p.Active)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -325,11 +331,15 @@ func (s *Store) GetPricingByModel(modelID string) (*CreditPricing, error) {
 	return &p, nil
 }
 
-// ListActivePricing returns all active pricing rules.
+// ListActivePricing returns all active pricing rules. Rates are credits per
+// million tokens (see GetPricingByModel for the COALESCE rationale).
 func (s *Store) ListActivePricing() ([]CreditPricing, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
-		`SELECT id, model_id, prompt_rate, completion_rate, typical_completion, effective_from, active
+		`SELECT id, model_id,
+		        COALESCE(prompt_rate_mtok, prompt_rate * 1000000),
+		        COALESCE(completion_rate_mtok, completion_rate * 1000000),
+		        typical_completion, effective_from, active
 		 FROM credit_pricing WHERE active = TRUE ORDER BY model_id`,
 	)
 	if err != nil {
@@ -340,7 +350,7 @@ func (s *Store) ListActivePricing() ([]CreditPricing, error) {
 	var pricing []CreditPricing
 	for rows.Next() {
 		var p CreditPricing
-		if err := rows.Scan(&p.ID, &p.ModelID, &p.PromptRate, &p.CompletionRate,
+		if err := rows.Scan(&p.ID, &p.ModelID, &p.PromptRatePerMTok, &p.CompletionRatePerMTok,
 			&p.TypicalCompletion, &p.EffectiveFrom, &p.Active); err != nil {
 			return nil, err
 		}
@@ -349,18 +359,26 @@ func (s *Store) ListActivePricing() ([]CreditPricing, error) {
 	return pricing, rows.Err()
 }
 
-// UpsertPricing creates or updates a pricing rule.
-func (s *Store) UpsertPricing(modelID string, promptRate, completionRate float64, typicalCompletion int) error {
+// UpsertPricing creates or updates a pricing rule. Rates are credits per
+// MILLION tokens. The deprecated per-token columns (prompt_rate,
+// completion_rate) are kept in sync (= rate / 1e6, computed in numeric so
+// the decimal shift is exact, then rounded to their 10-decimal scale) so a
+// rolled-back binary still reads correct prices; they are dropped in a
+// later release.
+func (s *Store) UpsertPricing(modelID string, promptRatePerMTok, completionRatePerMTok float64, typicalCompletion int) error {
 	_, err := s.pool.Exec(
 		context.Background(),
-		`INSERT INTO credit_pricing (model_id, prompt_rate, completion_rate, typical_completion)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO credit_pricing
+		   (model_id, prompt_rate, completion_rate, prompt_rate_mtok, completion_rate_mtok, typical_completion)
+		 VALUES ($1, $2::numeric / 1000000, $3::numeric / 1000000, $2, $3, $4)
 		 ON CONFLICT (model_id) DO UPDATE SET
 		   prompt_rate = EXCLUDED.prompt_rate,
 		   completion_rate = EXCLUDED.completion_rate,
+		   prompt_rate_mtok = EXCLUDED.prompt_rate_mtok,
+		   completion_rate_mtok = EXCLUDED.completion_rate_mtok,
 		   typical_completion = EXCLUDED.typical_completion,
 		   active = TRUE`,
-		modelID, promptRate, completionRate, typicalCompletion,
+		modelID, promptRatePerMTok, completionRatePerMTok, typicalCompletion,
 	)
 	return err
 }
