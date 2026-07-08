@@ -57,9 +57,10 @@ type APIKey struct {
 	RateLimit         int
 	CreatedAt         time.Time
 	Revoked           bool
-	UserID            *int64 // nil = legacy admin-created key
-	AccountID         *int64 // nil = legacy key not on credit system
-	SessionTokenLimit *int   // nil = no session limit
+	UserID            *int64     // nil = legacy admin-created key
+	AccountID         *int64     // nil = legacy key not on credit system
+	SessionTokenLimit *int       // nil = no session limit
+	LastUsedAt        *time.Time // nil = key has never served a request; derived from usage_logs
 }
 
 type Account struct {
@@ -318,11 +319,23 @@ func (s *Store) GetKeyByHash(hash string) (*APIKey, error) {
 	return &apiKey, nil
 }
 
-// ListKeys returns all API keys (for admin display).
+// ListKeys returns all API keys (for admin display). last_used_at is derived
+// from usage_logs as MAX(created_at) per key — a LEFT JOIN over the aggregate
+// so keys that never served a request report NULL rather than being dropped.
+// The idx_usage_logs_key_created (api_key_id, created_at) index makes the
+// grouped max a cheap index-only scan.
 func (s *Store) ListKeys() ([]APIKey, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
-		`SELECT id, name, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit FROM api_keys ORDER BY id`,
+		`SELECT k.id, k.name, k.key_prefix, k.rate_limit, k.created_at, k.revoked,
+		        k.user_id, k.account_id, k.session_token_limit, u.last_used_at
+		 FROM api_keys k
+		 LEFT JOIN (
+		     SELECT api_key_id, MAX(created_at) AS last_used_at
+		     FROM usage_logs
+		     GROUP BY api_key_id
+		 ) u ON u.api_key_id = k.id
+		 ORDER BY k.id`,
 	)
 	if err != nil {
 		return nil, err
@@ -333,7 +346,7 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 	for rows.Next() {
 		var apiKey APIKey
 		if err := rows.Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &apiKey.Revoked,
-			&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit); err != nil {
+			&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.LastUsedAt); err != nil {
 			return nil, err
 		}
 		keys = append(keys, apiKey)
@@ -342,15 +355,17 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 }
 
 // GetKeyByID looks up an API key by ID, including revoked keys so admin UI
-// can display their history.
+// can display their history. last_used_at is derived from usage_logs as the
+// most recent request time (NULL when the key has never served traffic).
 func (s *Store) GetKeyByID(id int64) (*APIKey, error) {
 	var apiKey APIKey
 	err := s.pool.QueryRow(
 		context.Background(),
-		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit,
+		        (SELECT MAX(created_at) FROM usage_logs WHERE api_key_id = api_keys.id)
 		 FROM api_keys WHERE id = $1`, id,
 	).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.RateLimit,
-		&apiKey.CreatedAt, &apiKey.Revoked, &apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit)
+		&apiKey.CreatedAt, &apiKey.Revoked, &apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.LastUsedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
