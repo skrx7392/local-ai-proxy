@@ -48,10 +48,11 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Port != "8080" {
 		t.Errorf("expected default port '8080', got %q", cfg.Port)
 	}
-	// OLLAMA_URL no longer defaults to localhost: unset (or explicitly
-	// empty) means no implicit node is ever synthesized.
-	if cfg.OllamaURL != "" {
-		t.Errorf("expected empty OllamaURL when unset, got %q", cfg.OllamaURL)
+	// The legacy localhost default remains for the not-yet-rewired proxy
+	// path (removed in BE-6), but OllamaURLSet=false means no node is ever
+	// synthesized from it.
+	if cfg.OllamaURL != "http://localhost:11434" {
+		t.Errorf("expected legacy default OllamaURL, got %q", cfg.OllamaURL)
 	}
 	if cfg.OllamaURLSet {
 		t.Error("expected OllamaURLSet=false when OLLAMA_URL is unset")
@@ -208,8 +209,10 @@ func TestLoad_OllamaURL_UnsetMeansNoSynthesis(t *testing.T) {
 	if cfg.OllamaURLSet {
 		t.Error("expected OllamaURLSet=false when OLLAMA_URL is absent")
 	}
-	if cfg.OllamaURL != "" {
-		t.Errorf("expected empty OllamaURL, got %q", cfg.OllamaURL)
+	// Legacy consumers (health checker, proxy constructor) still read
+	// cfg.OllamaURL until BE-6 rewires them; it must stay usable.
+	if cfg.OllamaURL != "http://localhost:11434" {
+		t.Errorf("expected legacy default OllamaURL, got %q", cfg.OllamaURL)
 	}
 }
 
@@ -224,6 +227,9 @@ func TestLoad_OllamaURL_ExplicitlyEmptyTreatedAsUnset(t *testing.T) {
 	}
 	if cfg.OllamaURLSet {
 		t.Error("expected OllamaURLSet=false for explicitly empty OLLAMA_URL")
+	}
+	if cfg.OllamaURL != "http://localhost:11434" {
+		t.Errorf("expected legacy default OllamaURL for empty value, got %q", cfg.OllamaURL)
 	}
 }
 

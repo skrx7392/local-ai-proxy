@@ -7,6 +7,9 @@ import (
 )
 
 type Config struct {
+	// OllamaURL keeps its legacy localhost default solely for the pre-BE-6
+	// proxy/health code paths; node synthesis must NEVER read it without
+	// checking OllamaURLSet first.
 	OllamaURL string
 	// OllamaURLSet records whether OLLAMA_URL was explicitly present (and
 	// non-empty) in the environment. Node synthesis keys off explicit
@@ -103,13 +106,21 @@ func Load() (Config, error) {
 
 	// Track explicit presence of OLLAMA_URL (empty counts as unset, matching
 	// the rest of the config): node synthesis must distinguish "operator
-	// pointed us at an Ollama" from "nothing configured". The old implicit
-	// http://localhost:11434 default is deliberately gone.
+	// pointed us at an Ollama" from "nothing configured", so it keys off
+	// OllamaURLSet — never the value. The value keeps the legacy localhost
+	// default ONLY for the not-yet-rewired consumers (health checker, proxy
+	// constructor, admin config snapshot); BE-6 removes the default together
+	// with those code paths, at which point an unset OLLAMA_URL means a
+	// zero-node install.
 	ollamaURL, ollamaSet := os.LookupEnv("OLLAMA_URL")
+	ollamaExplicit := ollamaSet && ollamaURL != ""
+	if !ollamaExplicit {
+		ollamaURL = "http://localhost:11434"
+	}
 
 	return Config{
 		OllamaURL:           ollamaURL,
-		OllamaURLSet:        ollamaSet && ollamaURL != "",
+		OllamaURLSet:        ollamaExplicit,
 		NodesFile:           os.Getenv("NODES_FILE"),
 		AdminKey:            adminKey,
 		AdminBootstrapToken: os.Getenv("ADMIN_BOOTSTRAP_TOKEN"),
