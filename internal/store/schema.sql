@@ -158,6 +158,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_logs_key_created
 --   'registration_token'   — service account via POST /api/accounts/register
 --   'admin_bootstrap'      — first admin or DR admin via /api/admin/bootstrap
 --   'admin_create'         — admin-created user via POST /api/admin/users (future)
+--   'admin_service'        — the auto-created "admin-service" account (OSS-2)
 --   'backfill'             — rows inserted by the PR 1 backfill for historical data
 -- The column is TEXT (not an enum) so new sources don't require a migration.
 CREATE TABLE IF NOT EXISTS registration_events (

@@ -142,6 +142,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Ensure the admin service account exists and attach any remaining
+	// NULL-account API keys to it (idempotent). This removes the credit-gate
+	// bypass: every key — including admin-minted ones — is account-backed
+	// and metered. Live legacy keys keep working via the service account.
+	adminAccountID, err := db.EnsureAdminServiceAccount(cfg.AdminServiceCreditGrant)
+	if err != nil {
+		slog.Error("ensure admin service account error", "error", err)
+		os.Exit(1)
+	}
+	attached, err := db.BackfillAdminKeyAccounts(adminAccountID)
+	if err != nil {
+		slog.Error("backfill admin key accounts error", "error", err)
+		os.Exit(1)
+	}
+	if attached > 0 {
+		slog.Info("attached legacy API keys to accounts", "count", attached, "admin_account_id", adminAccountID)
+	}
+
 	// Backfill credit balances for accounts that lack one
 	if err := db.BackfillCreditBalances(); err != nil {
 		slog.Error("backfill credit balances error", "error", err)
@@ -246,6 +264,8 @@ func main() {
 		Metrics:   m,
 		Registry:  reg,
 		Refresher: nodePoller,
+
+		AdminServiceCreditGrant: cfg.AdminServiceCreditGrant,
 	})
 	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken, m)
 	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant, m, authGuard)

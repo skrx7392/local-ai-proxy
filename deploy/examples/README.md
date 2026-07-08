@@ -58,7 +58,21 @@ with `static_models` the gateway trusts the list, it cannot verify it:
 docker compose exec ollama-b ollama pull llama3.2:1b
 ```
 
-## 3. Create an API key and chat
+## 3. Add pricing, create an API key, and chat
+
+Every key is credit-backed — including admin-created ones — so the model you
+want to chat with must be **priced** first:
+
+```bash
+curl -s -X POST -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"model_id":"smollm2:135m","prompt_rate":0.001,"completion_rate":0.001,"typical_completion":300}' \
+  http://localhost:18080/api/admin/pricing
+```
+
+Now mint a key and chat. With no `account_id` in the request, the key attaches
+to the auto-created **`admin-service`** account, which starts with a generous
+balance (`ADMIN_SERVICE_CREDIT_GRANT`, default 1,000,000 credits) — so the
+smoke test needs no extra credit setup:
 
 ```bash
 KEY=$(curl -s -X POST -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
@@ -69,28 +83,25 @@ curl -s http://localhost:18080/api/v1/chat/completions \
   -d '{"model":"smollm2:135m","messages":[{"role":"user","content":"Say hi in five words."}]}' | jq
 ```
 
-Admin-created keys are not bound to a credit account, so they bypass the
-credit gate and the pricing allowlist — handy for smoke tests.
+To bind a key to a specific account instead (create the account via user or
+service registration, grant it credits, then mint), pass `"account_id": <id>`
+in the key request or use `POST /api/admin/accounts/{id}/keys`.
 
 ## 4. Pricing and `/v1/models`
 
 `GET /api/v1/models` lists the intersection of *actively priced* models and
 models *served by a healthy node*. The pricing catalog starts **empty** —
 nothing is seeded, and the gateway logs a startup warning while it stays
-that way — so add pricing for your model to make it show up:
+that way. Step 3 already added pricing for `smollm2:135m`, so it shows up:
 
 ```bash
-curl -s -X POST -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
-  -d '{"model_id":"smollm2:135m","prompt_rate":0.001,"completion_rate":0.001,"typical_completion":300}' \
-  http://localhost:18080/api/admin/pricing
-
 curl -s -H "Authorization: Bearer $KEY" http://localhost:18080/api/v1/models | jq
 ```
 
-Pricing is also **required** for any credit-backed key (keys created for user
-or service accounts): requests for unpriced models are rejected with `400
-unknown_model`, and the account needs a positive credit balance
-(`POST /api/admin/accounts/{id}/credits`, or set `DEFAULT_CREDIT_GRANT`).
+Pricing is **required** for every key: requests for unpriced models are
+rejected with `400 unknown_model`, and the key's account needs a positive
+credit balance (`POST /api/admin/accounts/{id}/credits`, or set
+`DEFAULT_CREDIT_GRANT` for newly registered accounts).
 
 ## 5. Per-node usage attribution
 

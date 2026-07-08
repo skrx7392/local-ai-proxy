@@ -382,3 +382,45 @@ func TestLoad_AuthRateLimitRejectsInvalid(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_AdminServiceCreditGrant_Default(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("ADMIN_SERVICE_CREDIT_GRANT", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminServiceCreditGrant != 1000000 {
+		t.Errorf("expected default admin service grant 1000000, got %v", cfg.AdminServiceCreditGrant)
+	}
+}
+
+func TestLoad_AdminServiceCreditGrant_Custom(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("ADMIN_SERVICE_CREDIT_GRANT", "2500.5")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdminServiceCreditGrant != 2500.5 {
+		t.Errorf("expected admin service grant 2500.5, got %v", cfg.AdminServiceCreditGrant)
+	}
+}
+
+func TestLoad_AdminServiceCreditGrant_RejectsInvalid(t *testing.T) {
+	for _, v := range []string{"not-a-number", "-5"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("ADMIN_KEY", "key")
+			t.Setenv("DATABASE_URL", "postgres://localhost/db")
+			t.Setenv("ADMIN_SERVICE_CREDIT_GRANT", v)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for ADMIN_SERVICE_CREDIT_GRANT=%s", v)
+			}
+		})
+	}
+}

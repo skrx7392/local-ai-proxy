@@ -279,7 +279,11 @@ func isTransientMigrateError(err error) bool {
 	return false
 }
 
-// CreateKey inserts a new API key and returns its ID.
+// CreateKey inserts a new API key with no account attached and returns its
+// ID. No production path calls this anymore — every minted key is
+// account-backed (see CreateKeyForAccountOnly / CreateKeyForAccount) and the
+// credit gate rejects NULL-account keys. It is kept for tests that simulate
+// the pre-OSS-2 legacy state exercised by BackfillAdminKeyAccounts.
 func (s *Store) CreateKey(name, keyHash, keyPrefix string, rateLimit int) (int64, error) {
 	var id int64
 	err := s.pool.QueryRow(

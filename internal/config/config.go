@@ -37,6 +37,12 @@ type Config struct {
 	DefaultCreditGrant  float64
 	LogLevel            string
 
+	// AdminServiceCreditGrant is the credit balance the auto-created
+	// "admin-service" account starts with (applied once, at creation).
+	// Generous by default so upgrading deployments' legacy admin keys keep
+	// working; operators can lower it via ADMIN_SERVICE_CREDIT_GRANT.
+	AdminServiceCreditGrant float64
+
 	// Public auth-surface rate limits (requests per minute) and the global
 	// bcrypt concurrency cap. See internal/authlimit.
 	AuthLoginPerMinIP     int
@@ -87,6 +93,21 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("invalid DEFAULT_CREDIT_GRANT: %w", err)
 		}
 		defaultCreditGrant = n
+	}
+
+	// Initial balance for the auto-created admin service account. Defaults
+	// high (1M credits) so admin/smoke-test keys work out of the box; a
+	// negative value is a configuration error.
+	adminServiceCreditGrant := float64(1000000)
+	if v := os.Getenv("ADMIN_SERVICE_CREDIT_GRANT"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid ADMIN_SERVICE_CREDIT_GRANT: %w", err)
+		}
+		if n < 0 {
+			return Config{}, fmt.Errorf("invalid ADMIN_SERVICE_CREDIT_GRANT: must be >= 0, got %v", n)
+		}
+		adminServiceCreditGrant = n
 	}
 
 	authLoginIP, err := intEnvOrDefault("AUTH_RATELIMIT_LOGIN_PER_MIN", 5)
@@ -145,6 +166,8 @@ func Load() (Config, error) {
 		MaxJSONBody:         maxJSONBody,
 		DefaultCreditGrant:  defaultCreditGrant,
 		LogLevel:            envOrDefault("LOG_LEVEL", "info"),
+
+		AdminServiceCreditGrant: adminServiceCreditGrant,
 
 		AuthLoginPerMinIP:     authLoginIP,
 		AuthLoginPerMinEmail:  authLoginEmail,
