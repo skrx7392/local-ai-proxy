@@ -10,6 +10,11 @@ import (
 // UsageFilter constrains the set of usage_logs rows aggregated by the
 // analytics methods. All fields are optional; zero-valued fields skip that
 // filter. Filters compose with AND semantics.
+//
+// NodeID restricts to rows served by one backend node. Rows logged before
+// node routing existed carry a NULL node_id: they never belonged to any
+// node, so they are excluded whenever NodeID is set but still counted when
+// it is nil — mirroring GetUsageStats on the legacy /api/admin/usage path.
 type UsageFilter struct {
 	Since     *time.Time
 	Until     *time.Time
@@ -17,6 +22,7 @@ type UsageFilter struct {
 	APIKeyID  *int64
 	UserID    *int64
 	Model     *string
+	NodeID    *int64
 }
 
 // UsageSummary is the aggregated response for GetUsageSummary.
@@ -98,6 +104,14 @@ func buildUsageFilterClause(sb *strings.Builder, args []any, f UsageFilter, argI
 	if f.Model != nil {
 		fmt.Fprintf(sb, " AND ul.model = $%d", argIdx)
 		args = append(args, *f.Model)
+		argIdx++
+	}
+	if f.NodeID != nil {
+		// Plain equality: NULL node_id rows never match, which is the
+		// intended exclusion (see UsageFilter doc). Served by
+		// idx_usage_logs_node_created.
+		fmt.Fprintf(sb, " AND ul.node_id = $%d", argIdx)
+		args = append(args, *f.NodeID)
 		argIdx++
 	}
 	return args, argIdx

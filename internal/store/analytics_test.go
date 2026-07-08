@@ -9,7 +9,9 @@ import (
 
 // seedAnalyticsFixture creates a small, deterministic dataset for analytics
 // tests: two accounts (one personal with a user, one service), three keys,
-// two models, 9 usage rows across a 3-day window.
+// two models, two nodes, 9 usage rows across a 3-day window. Rows are
+// attributed to nodeA (4 rows), nodeB (3 rows), or no node (2 rows, NULL
+// node_id — logged before node routing existed).
 type analyticsFixture struct {
 	personalAccountID int64
 	serviceAccountID  int64
@@ -19,6 +21,8 @@ type analyticsFixture struct {
 	keyUser           int64 // user-owned key
 	keyUser2          int64 // second user-owned key (personal account)
 	keyService        int64 // service-account key
+	nodeA             int64
+	nodeB             int64
 	t0                time.Time
 }
 
@@ -52,13 +56,23 @@ func seedAnalyticsFixture(t *testing.T, s *Store) analyticsFixture {
 		t.Fatalf("CreateKeyForAccountOnly: %v", err)
 	}
 
+	nodeA, err := s.CreateNode(Node{Name: "analytics-node-a", BaseURL: "http://analytics-a:11434"})
+	if err != nil {
+		t.Fatalf("CreateNode a: %v", err)
+	}
+	nodeB, err := s.CreateNode(Node{Name: "analytics-node-b", BaseURL: "http://analytics-b:11434"})
+	if err != nil {
+		t.Fatalf("CreateNode b: %v", err)
+	}
+
 	// Day-align t0 so tests that assert day-bucket counts are deterministic
 	// regardless of wall-clock hour. Hour-bucket tests still see 9 distinct
 	// hour offsets (0,1,2,3,4,5,25,26,27) because those are computed relative
 	// to t0, not absolute UTC hours.
 	t0 := time.Now().UTC().Add(-48 * time.Hour).Truncate(24 * time.Hour)
 
-	// Model A rows for user (various times, all success).
+	// Model A rows for user (various times, all success). Node attribution:
+	// nodeA gets rows 0,1,4,6; nodeB gets rows 2,5,8; rows 3,7 stay NULL.
 	rows := []struct {
 		keyID  int64
 		model  string
@@ -69,23 +83,24 @@ func seedAnalyticsFixture(t *testing.T, s *Store) analyticsFixture {
 		credit float64
 		status string
 		offset time.Duration
+		nodeID *int64
 	}{
-		{keyUser, "llama3.1:8b", 100, 50, 150, 200, 0.30, "completed", 0 * time.Hour},
-		{keyUser, "llama3.1:8b", 200, 100, 300, 300, 0.60, "completed", 1 * time.Hour},
-		{keyUser, "gpt-4o-mini", 50, 25, 75, 150, 0.15, "completed", 2 * time.Hour},
-		{keyUser2, "llama3.1:8b", 80, 40, 120, 180, 0.24, "completed", 3 * time.Hour},
-		{keyUser2, "gpt-4o-mini", 30, 15, 45, 100, 0.09, "error", 4 * time.Hour},
-		{keyService, "llama3.1:8b", 500, 250, 750, 500, 1.50, "completed", 5 * time.Hour},
-		{keyService, "llama3.1:8b", 600, 300, 900, 600, 1.80, "completed", 25 * time.Hour},
-		{keyService, "gpt-4o-mini", 40, 20, 60, 120, 0.12, "completed", 26 * time.Hour},
-		{keyService, "gpt-4o-mini", 20, 10, 30, 80, 0.06, "error", 27 * time.Hour},
+		{keyUser, "llama3.1:8b", 100, 50, 150, 200, 0.30, "completed", 0 * time.Hour, &nodeA},
+		{keyUser, "llama3.1:8b", 200, 100, 300, 300, 0.60, "completed", 1 * time.Hour, &nodeA},
+		{keyUser, "gpt-4o-mini", 50, 25, 75, 150, 0.15, "completed", 2 * time.Hour, &nodeB},
+		{keyUser2, "llama3.1:8b", 80, 40, 120, 180, 0.24, "completed", 3 * time.Hour, nil},
+		{keyUser2, "gpt-4o-mini", 30, 15, 45, 100, 0.09, "error", 4 * time.Hour, &nodeA},
+		{keyService, "llama3.1:8b", 500, 250, 750, 500, 1.50, "completed", 5 * time.Hour, &nodeB},
+		{keyService, "llama3.1:8b", 600, 300, 900, 600, 1.80, "completed", 25 * time.Hour, &nodeA},
+		{keyService, "gpt-4o-mini", 40, 20, 60, 120, 0.12, "completed", 26 * time.Hour, nil},
+		{keyService, "gpt-4o-mini", 20, 10, 30, 80, 0.06, "error", 27 * time.Hour, &nodeB},
 	}
 
 	for _, r := range rows {
 		_, err := s.pool.Exec(ctx,
-			`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			r.keyID, r.model, r.prompt, r.comp, r.total, r.dur, r.status, r.credit, t0.Add(r.offset),
+			`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at, node_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			r.keyID, r.model, r.prompt, r.comp, r.total, r.dur, r.status, r.credit, t0.Add(r.offset), r.nodeID,
 		)
 		if err != nil {
 			t.Fatalf("insert usage row: %v", err)
@@ -108,6 +123,8 @@ func seedAnalyticsFixture(t *testing.T, s *Store) analyticsFixture {
 		keyUser:           keyUser,
 		keyUser2:          keyUser2,
 		keyService:        keyService,
+		nodeA:             nodeA,
+		nodeB:             nodeB,
 		t0:                t0,
 	}
 }
@@ -121,16 +138,18 @@ func seedAnalyticsFixtureLarge(t *testing.T, s *Store) analyticsFixture {
 	fx := seedAnalyticsFixture(t, s)
 	ctx := context.Background()
 
-	// Insert 2000 rows with selective model/key distribution so the planner
-	// can distinguish between indexes on different columns.
+	// Insert 2000 rows with selective model/key/node distribution so the
+	// planner can distinguish between indexes on different columns. One in
+	// five rows is attributed to nodeA; the rest keep a NULL node_id.
 	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at)
+		`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at, node_id)
 		 SELECT
 		   CASE WHEN i % 3 = 0 THEN $1::bigint WHEN i % 3 = 1 THEN $2::bigint ELSE $3::bigint END,
 		   'model-' || (i % 20),
-		   10, 5, 15, 100, 'completed', 0.01, NOW() - (i * INTERVAL '1 minute')
+		   10, 5, 15, 100, 'completed', 0.01, NOW() - (i * INTERVAL '1 minute'),
+		   CASE WHEN i % 5 = 0 THEN $4::bigint END
 		 FROM generate_series(1, 2000) AS i`,
-		fx.keyUser, fx.keyUser2, fx.keyService,
+		fx.keyUser, fx.keyUser2, fx.keyService, fx.nodeA,
 	); err != nil {
 		t.Fatalf("seed extra rows: %v", err)
 	}
@@ -247,6 +266,52 @@ func TestGetUsageSummary_FilterByModel(t *testing.T) {
 	}
 }
 
+func TestGetUsageSummary_FilterByNodeID(t *testing.T) {
+	s := setupTestStore(t)
+	fx := seedAnalyticsFixture(t, s)
+
+	// nodeA rows: offsets 0,1,4,25 → tokens 150+300+45+900, credits
+	// 0.30+0.60+0.09+1.80, one error (offset 4). NULL-node rows (offsets
+	// 3,26) and nodeB rows must be excluded.
+	summary, err := s.GetUsageSummary(UsageFilter{NodeID: &fx.nodeA})
+	if err != nil {
+		t.Fatalf("GetUsageSummary nodeA: %v", err)
+	}
+	if summary.Requests != 4 {
+		t.Errorf("expected 4 nodeA requests, got %d", summary.Requests)
+	}
+	if summary.TotalTokens != 1395 {
+		t.Errorf("expected nodeA total_tokens=1395, got %d", summary.TotalTokens)
+	}
+	if summary.PromptTokens != 930 {
+		t.Errorf("expected nodeA prompt_tokens=930, got %d", summary.PromptTokens)
+	}
+	if summary.Errors != 1 {
+		t.Errorf("expected 1 nodeA error, got %d", summary.Errors)
+	}
+	wantCredits := 2.79
+	if diff := summary.Credits - wantCredits; diff < -0.0001 || diff > 0.0001 {
+		t.Errorf("expected nodeA credits ~= %f, got %f", wantCredits, summary.Credits)
+	}
+
+	summary, err = s.GetUsageSummary(UsageFilter{NodeID: &fx.nodeB})
+	if err != nil {
+		t.Fatalf("GetUsageSummary nodeB: %v", err)
+	}
+	if summary.Requests != 3 {
+		t.Errorf("expected 3 nodeB requests, got %d", summary.Requests)
+	}
+
+	// Unfiltered behavior is unchanged: NULL-node rows still count.
+	summary, err = s.GetUsageSummary(UsageFilter{})
+	if err != nil {
+		t.Fatalf("GetUsageSummary unfiltered: %v", err)
+	}
+	if summary.Requests != 9 {
+		t.Errorf("expected 9 unfiltered requests, got %d", summary.Requests)
+	}
+}
+
 func TestGetUsageSummary_FilterByTimeRange(t *testing.T) {
 	s := setupTestStore(t)
 	fx := seedAnalyticsFixture(t, s)
@@ -313,6 +378,28 @@ func TestGetUsageByModel_FilterByAccountID(t *testing.T) {
 	// service account only: llama = 750+900 = 1650, gpt = 60+30 = 90
 	if rows[0].Model != "llama3.1:8b" || rows[0].TotalTokens != 1650 {
 		t.Errorf("unexpected first row: %+v", rows[0])
+	}
+}
+
+func TestGetUsageByModel_FilterByNodeID(t *testing.T) {
+	s := setupTestStore(t)
+	fx := seedAnalyticsFixture(t, s)
+
+	rows, err := s.GetUsageByModel(UsageFilter{NodeID: &fx.nodeA})
+	if err != nil {
+		t.Fatalf("GetUsageByModel: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 model rows for nodeA, got %d: %+v", len(rows), rows)
+	}
+	// nodeA llama rows (offsets 0,1,25): 150+300+900 = 1350 across 3 requests.
+	// nodeA gpt row (offset 4): 45 across 1 request. NULL-node llama row
+	// (offset 3, 120 tokens) must not leak in.
+	if rows[0].Model != "llama3.1:8b" || rows[0].Requests != 3 || rows[0].TotalTokens != 1350 {
+		t.Errorf("unexpected first nodeA row: %+v", rows[0])
+	}
+	if rows[1].Model != "gpt-4o-mini" || rows[1].Requests != 1 || rows[1].TotalTokens != 45 {
+		t.Errorf("unexpected second nodeA row: %+v", rows[1])
 	}
 }
 
@@ -412,6 +499,42 @@ func TestGetUsageByUser_UnattributedKey(t *testing.T) {
 	}
 }
 
+func TestGetUsageByUser_FilterByNodeID(t *testing.T) {
+	s := setupTestStore(t)
+	fx := seedAnalyticsFixture(t, s)
+
+	rows, err := s.GetUsageByUser(UsageFilter{NodeID: &fx.nodeA})
+	if err != nil {
+		t.Fatalf("GetUsageByUser: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 owner rows for nodeA, got %d: %+v", len(rows), rows)
+	}
+
+	var userRow, svcRow *OwnerUsageRow
+	for i := range rows {
+		if rows[i].UserID != nil {
+			userRow = &rows[i]
+		} else if rows[i].AccountID != nil {
+			svcRow = &rows[i]
+		}
+	}
+	if userRow == nil || svcRow == nil {
+		t.Fatalf("expected one user row and one service row, got %+v", rows)
+	}
+	// nodeA user rows: keyUser offsets 0,1 + keyUser2 offset 4 → 3 requests,
+	// 150+300+45 = 495 tokens across 2 distinct keys. The NULL-node keyUser2
+	// row (offset 3) is excluded, but keyUser2 still counts via offset 4.
+	if userRow.Requests != 3 || userRow.TotalTokens != 495 || userRow.KeyCount != 2 {
+		t.Errorf("unexpected nodeA user row: %+v", userRow)
+	}
+	// nodeA service row: offset 25 only → 1 request, 900 tokens, 1 key. The
+	// NULL-node service row (offset 26) is excluded.
+	if svcRow.Requests != 1 || svcRow.TotalTokens != 900 || svcRow.KeyCount != 1 {
+		t.Errorf("unexpected nodeA service row: %+v", svcRow)
+	}
+}
+
 func TestGetUsageTimeseries_HourBuckets(t *testing.T) {
 	s := setupTestStore(t)
 	fx := seedAnalyticsFixture(t, s)
@@ -484,6 +607,31 @@ func TestGetUsageTimeseries_WithFilters(t *testing.T) {
 	}
 }
 
+func TestGetUsageTimeseries_FilterByNodeID(t *testing.T) {
+	s := setupTestStore(t)
+	fx := seedAnalyticsFixture(t, s)
+
+	buckets, err := s.GetUsageTimeseries(UsageFilter{NodeID: &fx.nodeA}, "hour")
+	if err != nil {
+		t.Fatalf("GetUsageTimeseries: %v", err)
+	}
+	// nodeA rows sit at hour offsets 0, 1, 4, 25 → 4 buckets, 1 request each.
+	// The NULL-node rows (offsets 3, 26) must not produce buckets.
+	if len(buckets) != 4 {
+		t.Fatalf("expected 4 nodeA hour buckets, got %d: %+v", len(buckets), buckets)
+	}
+	total := 0
+	for _, b := range buckets {
+		if b.Requests != 1 {
+			t.Errorf("expected 1 request per nodeA bucket, got %d at %v", b.Requests, b.Bucket)
+		}
+		total += b.Requests
+	}
+	if total != 4 {
+		t.Errorf("expected 4 nodeA requests across buckets, got %d", total)
+	}
+}
+
 // --- EXPLAIN assertions ---
 
 func TestExplain_ByModel_UsesModelIndex(t *testing.T) {
@@ -526,6 +674,19 @@ func TestExplain_Summary_WithAPIKeyFilter_UsesKeyIndex(t *testing.T) {
 	if !(planUsesIndex(t, s, query, args, "idx_usage_logs_key_id") ||
 		planUsesIndex(t, s, query, args, "idx_usage_logs_key_created")) {
 		t.Error("expected plan to use an api_key_id-based index for summary with api_key_id")
+	}
+}
+
+func TestExplain_Summary_WithNodeFilter_UsesNodeIndex(t *testing.T) {
+	s := setupTestStore(t)
+	fx := seedAnalyticsFixtureLarge(t, s)
+	if !planUsesIndex(t, s,
+		`SELECT COUNT(*) FROM usage_logs ul JOIN api_keys k ON ul.api_key_id = k.id
+		 WHERE ul.node_id = $1`,
+		[]any{fx.nodeA},
+		"idx_usage_logs_node_created",
+	) {
+		t.Error("expected plan to use idx_usage_logs_node_created for summary with node_id")
 	}
 }
 

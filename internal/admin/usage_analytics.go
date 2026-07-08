@@ -110,11 +110,11 @@ func parseInt64QueryParam(raw string) (*int64, error) {
 	return &n, nil
 }
 
-// parseUsageFilter extracts since/until/account_id/api_key_id/user_id/model
-// from the request query string. Missing since/until are defaulted to a
-// rolling 7-day window ending at "now". Returns a 4xx-ready error if any
-// value is malformed; the code returned is the short "invalid_*" code the
-// handler should pass into proxy.WriteError.
+// parseUsageFilter extracts since/until/account_id/api_key_id/user_id/model/
+// node_id from the request query string. Missing since/until are defaulted
+// to a rolling 7-day window ending at "now". Returns a 4xx-ready error if
+// any value is malformed; the code returned is the short "invalid_*" code
+// the handler should pass into proxy.WriteError.
 func parseUsageFilter(r *http.Request, now time.Time) (store.UsageFilter, string, string, error) {
 	var f store.UsageFilter
 	q := r.URL.Query()
@@ -162,6 +162,19 @@ func parseUsageFilter(r *http.Request, now time.Time) (store.UsageFilter, string
 	}
 	if m := q.Get("model"); m != "" {
 		f.Model = &m
+	}
+
+	// node_id deliberately bypasses parseInt64QueryParam: the legacy
+	// GET /api/admin/usage endpoint (PR #49) accepts any int64 here —
+	// zero/negative simply match no rows — and only rejects non-numeric
+	// input. Keeping the two node_id filters contract-identical matters
+	// more than positive-only consistency with the other ID params.
+	if raw := q.Get("node_id"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return f, "invalid_node_id", "Invalid node_id parameter", err
+		}
+		f.NodeID = &id
 	}
 	return f, "", "", nil
 }
