@@ -64,10 +64,25 @@ func (n Node) clone() Node {
 }
 
 // NodeState is a node plus its runtime state, as exposed by Snapshot.
+// LastError and LastCheckedAt are probe metadata published by the health
+// poller via SetNodeProbe, surfaced for admin/display consumers (BE-7).
 type NodeState struct {
 	Node   Node
 	Health Health
 	Models []string // last reported model list; nil = not yet discovered
+
+	LastError     string    // most recent probe error; "" after a successful probe or before any probe
+	LastCheckedAt time.Time // when the node was last probed; zero = never probed
+}
+
+// ProbeResult is a health-poller probe outcome published via SetNodeProbe.
+// Models carries the node's current model list (nil = unknown, non-nil empty
+// = probed with zero models); LastError is empty for successful probes.
+type ProbeResult struct {
+	Health        Health
+	Models        []string
+	LastError     string
+	LastCheckedAt time.Time
 }
 
 // RegistrySnapshot is a self-consistent view of the registry: every node the
@@ -90,9 +105,11 @@ type snapshot struct {
 // entry is the writer-side authoritative state for one node, guarded by
 // Registry.mu.
 type entry struct {
-	node   Node
-	health Health
-	models []string
+	node          Node
+	health        Health
+	models        []string
+	lastError     string
+	lastCheckedAt time.Time
 }
 
 // Registry routes models to healthy backend nodes.
@@ -135,6 +152,8 @@ func (r *Registry) SetNodes(nodes []Node) {
 		if prev, ok := r.entries[n.ID]; ok && sameURL(prev.node.BaseURL, n.BaseURL) {
 			e.health = prev.health
 			e.models = prev.models
+			e.lastError = prev.lastError
+			e.lastCheckedAt = prev.lastCheckedAt
 		}
 		next[n.ID] = e
 	}
@@ -142,11 +161,13 @@ func (r *Registry) SetNodes(nodes []Node) {
 	r.publishLocked()
 }
 
-// SetNodeState records a probe result for one node and publishes a new
-// snapshot. models is the node's discovered (or static) model list; nil
+// SetNodeState records a health/model update for one node and publishes a
+// new snapshot. models is the node's discovered (or static) model list; nil
 // means the list is unknown, which keeps the node non-routable even when
-// healthy. State reported for a node ID the registry does not know is
-// ignored (the poller may race a node removal).
+// healthy. Probe metadata (LastError, LastCheckedAt) is left untouched — the
+// health poller publishes full probe outcomes via SetNodeProbe instead.
+// State reported for a node ID the registry does not know is ignored (the
+// poller may race a node removal).
 func (r *Registry) SetNodeState(nodeID int64, health Health, models []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -157,6 +178,25 @@ func (r *Registry) SetNodeState(nodeID int64, health Health, models []string) {
 	}
 	e.health = health
 	e.models = cloneModels(models)
+	r.publishLocked()
+}
+
+// SetNodeProbe records a full health-poller probe outcome for one node —
+// health, model list, and probe metadata (LastError, LastCheckedAt) — and
+// publishes a new snapshot. Results reported for a node ID the registry does
+// not know are ignored (the poller may race a node removal).
+func (r *Registry) SetNodeProbe(nodeID int64, res ProbeResult) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	e, ok := r.entries[nodeID]
+	if !ok {
+		return
+	}
+	e.health = res.Health
+	e.models = cloneModels(res.Models)
+	e.lastError = res.LastError
+	e.lastCheckedAt = res.LastCheckedAt
 	r.publishLocked()
 }
 
@@ -197,9 +237,11 @@ func (r *Registry) Snapshot() RegistrySnapshot {
 	}
 	for i, ns := range s.nodes {
 		out.Nodes[i] = NodeState{
-			Node:   ns.Node.clone(),
-			Health: ns.Health,
-			Models: cloneModels(ns.Models),
+			Node:          ns.Node.clone(),
+			Health:        ns.Health,
+			Models:        cloneModels(ns.Models),
+			LastError:     ns.LastError,
+			LastCheckedAt: ns.LastCheckedAt,
 		}
 	}
 	for model, candidates := range s.models {
@@ -219,7 +261,13 @@ func (r *Registry) publishLocked() {
 	nodes := make([]NodeState, 0, len(r.entries))
 	models := make(map[string][]Node)
 	for _, e := range r.entries {
-		nodes = append(nodes, NodeState{Node: e.node, Health: e.health, Models: e.models})
+		nodes = append(nodes, NodeState{
+			Node:          e.node,
+			Health:        e.health,
+			Models:        e.models,
+			LastError:     e.lastError,
+			LastCheckedAt: e.lastCheckedAt,
+		})
 		if e.health != HealthHealthy || e.models == nil {
 			continue
 		}
