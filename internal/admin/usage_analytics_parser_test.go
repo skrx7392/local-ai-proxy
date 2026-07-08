@@ -94,6 +94,61 @@ func TestParseUsageFilter_RejectsNonPositiveIDs(t *testing.T) {
 	}
 }
 
+func TestParseUsageFilter_NodeID(t *testing.T) {
+	// Absent → nil (no filter).
+	req := httptest.NewRequest("GET", "/", nil)
+	f, _, _, err := parseUsageFilter(req, parserNow)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if f.NodeID != nil {
+		t.Errorf("node_id absent: NodeID = %v, want nil", f.NodeID)
+	}
+
+	// Valid value is threaded through.
+	req = httptest.NewRequest("GET", "/?node_id=12", nil)
+	f, _, _, err = parseUsageFilter(req, parserNow)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if f.NodeID == nil || *f.NodeID != 12 {
+		t.Errorf("NodeID = %v, want 12", f.NodeID)
+	}
+
+	// Non-numeric → 400 with the exact code/message of the legacy
+	// /api/admin/usage endpoint (PR #49).
+	req = httptest.NewRequest("GET", "/?node_id=abc", nil)
+	_, code, msg, err := parseUsageFilter(req, parserNow)
+	if err == nil {
+		t.Fatal("expected error for non-numeric node_id")
+	}
+	if code != "invalid_node_id" {
+		t.Errorf("code = %q, want invalid_node_id", code)
+	}
+	if msg != "Invalid node_id parameter" {
+		t.Errorf("msg = %q, want %q", msg, "Invalid node_id parameter")
+	}
+}
+
+func TestParseUsageFilter_NodeIDLegacyParity(t *testing.T) {
+	// The legacy /api/admin/usage endpoint accepts any int64 for node_id —
+	// including zero and negatives, which simply match no rows. The analytics
+	// endpoints mirror that contract exactly rather than adopting the
+	// stricter positive-only rule used by account_id/api_key_id/user_id, so
+	// the two node_id filters never diverge.
+	for _, qs := range []string{"node_id=0", "node_id=-3"} {
+		req := httptest.NewRequest("GET", "/?"+qs, nil)
+		f, code, _, err := parseUsageFilter(req, parserNow)
+		if err != nil {
+			t.Errorf("%s: unexpected error %v (code=%s)", qs, err, code)
+			continue
+		}
+		if f.NodeID == nil {
+			t.Errorf("%s: NodeID = nil, want parsed value", qs)
+		}
+	}
+}
+
 func TestParseUsageFilter_AcceptsValidPositiveIDs(t *testing.T) {
 	req := httptest.NewRequest("GET", "/?account_id=5&api_key_id=7&user_id=9&model=llama", nil)
 	f, _, _, err := parseUsageFilter(req, parserNow)
