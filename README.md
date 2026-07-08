@@ -153,6 +153,18 @@ Nodes come from two coexisting sources: a static JSON file (`NODES_FILE`, the co
 - `OLLAMA_URL` explicitly set → a config-sourced node named `default` (`backend_type: "ollama"`) is synthesized from it at startup and merges exactly like a file node. Existing single-node deployments that set the variable upgrade with zero config changes. (Declaring another node named `default` in `NODES_FILE` at the same time is a startup error.)
 - `OLLAMA_URL` unset → no synthesis, ever. A `NODES_FILE`-only install gets exactly the nodes it declared; a fresh install starts with zero nodes — which is *ready*, so the admin API is available to register the first node via `POST /api/admin/nodes`. Chat requests return `503 model_unavailable` until a node serves the requested model.
 
+### Price your models (required setup step)
+
+The pricing catalog starts **empty** — nothing is seeded. `GET /api/v1/models` lists the intersection of *actively priced* models and models *served by a healthy node*, so after registering nodes you must price each model you want to expose (the gateway logs a warn-level reminder at startup while the catalog is empty):
+
+```bash
+curl -s -X POST -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"model_id":"llama3.1:8b","prompt_rate":0.002,"completion_rate":0.002,"typical_completion":500}' \
+  http://localhost:8080/api/admin/pricing
+```
+
+Pricing is also **required** for any credit-backed key (keys created for user or service accounts): requests for unpriced models are rejected with `400 unknown_model`. Rates are in credits per token; `typical_completion` feeds the completion-token estimate that sizes per-request credit holds when the client sends no `max_tokens` and the account has little usage history.
+
 ## Request Flow
 
 The middleware chain (auth → credit gate → rate limit) runs before routing, so `401`/`402`/`429` always precede `503 model_unavailable`. Within the proxy handler, order matters:

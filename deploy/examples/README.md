@@ -75,8 +75,9 @@ credit gate and the pricing allowlist — handy for smoke tests.
 ## 4. Pricing and `/v1/models`
 
 `GET /api/v1/models` lists the intersection of *actively priced* models and
-models *served by a healthy node*. The gateway seeds a default pricing
-catalog, but your model probably isn't in it — add pricing so it shows up:
+models *served by a healthy node*. The pricing catalog starts **empty** —
+nothing is seeded, and the gateway logs a startup warning while it stays
+that way — so add pricing for your model to make it show up:
 
 ```bash
 curl -s -X POST -H "X-Admin-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
