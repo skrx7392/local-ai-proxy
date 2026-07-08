@@ -234,6 +234,7 @@ func main() {
 		BuildTime:                        buildTime,
 		GoVersion:                        runtime.Version(),
 		ModelsListAll:                    cfg.ModelsListAll,
+		NodesFile:                        cfg.NodesFile,
 	}
 
 	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh, admin.Options{
@@ -241,6 +242,8 @@ func main() {
 		Checker:   hc,
 		StartTime: startTime,
 		Metrics:   m,
+		Registry:  reg,
+		Refresher: nodePoller,
 	})
 	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken, m)
 	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant, m, authGuard)

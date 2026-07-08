@@ -20,6 +20,7 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
+	"github.com/krishna/local-ai-proxy/internal/registry"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
@@ -50,6 +51,27 @@ type handler struct {
 
 	// BE 6: optional metrics sink. Nil-safe via m.Record* methods.
 	metrics *metrics.Metrics
+
+	// BE 7: node routing dependencies for /api/admin/nodes. Both are nil-safe:
+	// without a registry, live state reads as unknown; without a refresher,
+	// node mutations skip the synchronous probe.
+	nodeRegistry  NodeSnapshotter
+	nodeRefresher NodeRefresher
+}
+
+// NodeSnapshotter exposes the node registry's current routing state.
+// Satisfied by *registry.Registry.
+type NodeSnapshotter interface {
+	Snapshot() registry.RegistrySnapshot
+}
+
+// NodeRefresher synchronously reloads and re-probes one node, publishing the
+// outcome to the registry before returning. Satisfied by *poller.Poller
+// (RefreshNode). The admin handler calls it after every node mutation so the
+// change is live — probed and routable (or removed from routing) — before the
+// HTTP response returns.
+type NodeRefresher interface {
+	RefreshNode(ctx context.Context, nodeID int64) error
 }
 
 // Options carries optional dependencies wired by main. Tests that don't touch
@@ -59,6 +81,10 @@ type Options struct {
 	Checker   *health.Checker
 	StartTime time.Time
 	Metrics   *metrics.Metrics
+
+	// BE 7: node routing registry + poller for /api/admin/nodes.
+	Registry  NodeSnapshotter
+	Refresher NodeRefresher
 }
 
 type adminSessionCtxKey struct{}
@@ -104,6 +130,8 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 		healthChecker:     opts.Checker,
 		startTime:         opts.StartTime,
 		metrics:           opts.Metrics,
+		nodeRegistry:      opts.Registry,
+		nodeRefresher:     opts.Refresher,
 	}
 
 	mux := http.NewServeMux()
@@ -149,6 +177,14 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	// Config + health (BE 5)
 	mux.HandleFunc("GET /api/admin/config", handler.getConfig)
 	mux.HandleFunc("GET /api/admin/health", handler.getHealth)
+
+	// Backend node management (BE 7)
+	mux.HandleFunc("POST /api/admin/nodes", handler.createNode)
+	mux.HandleFunc("GET /api/admin/nodes", handler.listNodes)
+	mux.HandleFunc("GET /api/admin/nodes/{id}", handler.getNode)
+	mux.HandleFunc("PUT /api/admin/nodes/{id}", handler.updateNode)
+	mux.HandleFunc("DELETE /api/admin/nodes/{id}", handler.deleteNode)
+	mux.HandleFunc("POST /api/admin/nodes/{id}/refresh", handler.refreshNode)
 
 	return handler.authMiddleware(mux)
 }
@@ -389,6 +425,7 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 
 	var keyID *int64
 	var since *time.Time
+	var nodeID *int64
 
 	if v := r.URL.Query().Get("key_id"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
@@ -397,6 +434,15 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		keyID = &id
+	}
+
+	if v := r.URL.Query().Get("node_id"); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			proxy.WriteError(w, r, http.StatusBadRequest, "invalid_node_id", "invalid_request_error", "Invalid node_id parameter")
+			return
+		}
+		nodeID = &id
 	}
 
 	if v := r.URL.Query().Get("since"); v != "" {
@@ -412,7 +458,7 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 		since = &t
 	}
 
-	stats, err := h.store.GetUsageStats(keyID, since)
+	stats, err := h.store.GetUsageStats(keyID, since, nodeID)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "usage stats error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get usage stats")

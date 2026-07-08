@@ -188,6 +188,16 @@ func validateNode(n *Node) error {
 	return nil
 }
 
+// ValidateNode normalizes and validates the caller-supplied fields of n in
+// place (trims the name, canonicalizes base_url, defaults backend_type, and
+// checks auth_header/health_path/timeout_seconds). Exported so admin handlers
+// can map validation failures to 400 with the validator's message before
+// attempting a write; CreateNode and UpdateNode run the same validation
+// internally, so skipping this can never persist an invalid node.
+func ValidateNode(n *Node) error {
+	return validateNode(n)
+}
+
 // CreateNode validates, canonicalizes, and inserts a new node, returning its
 // ID. BackendType defaults to "ollama" and Source to "api" when empty; new
 // nodes are always created enabled. Returns ErrNodeNameExists on a name
