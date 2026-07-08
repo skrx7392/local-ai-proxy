@@ -154,9 +154,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Seed default model pricing (idempotent)
-	if err := credits.SeedDefaultPricing(db); err != nil {
-		slog.Error("seed pricing error", "error", err)
+	// Nothing seeds the pricing catalog: pricing your models is an explicit
+	// setup step (POST /api/admin/pricing). Warn loudly when the catalog is
+	// empty so operators know why /v1/models lists nothing.
+	if err := credits.WarnIfPricingEmpty(db, slog.Default()); err != nil {
+		slog.Error("pricing catalog check error", "error", err)
 		os.Exit(1)
 	}
 
