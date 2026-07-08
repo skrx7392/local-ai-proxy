@@ -48,14 +48,16 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Port != "8080" {
 		t.Errorf("expected default port '8080', got %q", cfg.Port)
 	}
-	// The legacy localhost default remains for the not-yet-rewired proxy
-	// path (removed in BE-6), but OllamaURLSet=false means no node is ever
-	// synthesized from it.
-	if cfg.OllamaURL != "http://localhost:11434" {
-		t.Errorf("expected legacy default OllamaURL, got %q", cfg.OllamaURL)
+	// BE-6 removed the legacy localhost default: unset OLLAMA_URL means no
+	// synthesized node and an empty raw value.
+	if cfg.OllamaURL != "" {
+		t.Errorf("expected empty OllamaURL when unset, got %q", cfg.OllamaURL)
 	}
 	if cfg.OllamaURLSet {
 		t.Error("expected OllamaURLSet=false when OLLAMA_URL is unset")
+	}
+	if cfg.ModelsListAll {
+		t.Error("expected ModelsListAll=false by default")
 	}
 	if cfg.CORSOrigins != "*" {
 		t.Errorf("expected default CORSOrigins '*', got %q", cfg.CORSOrigins)
@@ -209,10 +211,10 @@ func TestLoad_OllamaURL_UnsetMeansNoSynthesis(t *testing.T) {
 	if cfg.OllamaURLSet {
 		t.Error("expected OllamaURLSet=false when OLLAMA_URL is absent")
 	}
-	// Legacy consumers (health checker, proxy constructor) still read
-	// cfg.OllamaURL until BE-6 rewires them; it must stay usable.
-	if cfg.OllamaURL != "http://localhost:11434" {
-		t.Errorf("expected legacy default OllamaURL, got %q", cfg.OllamaURL)
+	// No legacy default: the raw value stays empty so the admin config
+	// snapshot reports exactly what the operator configured.
+	if cfg.OllamaURL != "" {
+		t.Errorf("expected empty OllamaURL when absent, got %q", cfg.OllamaURL)
 	}
 }
 
@@ -228,8 +230,8 @@ func TestLoad_OllamaURL_ExplicitlyEmptyTreatedAsUnset(t *testing.T) {
 	if cfg.OllamaURLSet {
 		t.Error("expected OllamaURLSet=false for explicitly empty OLLAMA_URL")
 	}
-	if cfg.OllamaURL != "http://localhost:11434" {
-		t.Errorf("expected legacy default OllamaURL for empty value, got %q", cfg.OllamaURL)
+	if cfg.OllamaURL != "" {
+		t.Errorf("expected empty OllamaURL for empty value, got %q", cfg.OllamaURL)
 	}
 }
 
@@ -247,6 +249,44 @@ func TestLoad_OllamaURL_ExplicitPresence(t *testing.T) {
 	}
 	if cfg.OllamaURL != "http://localhost:11434" {
 		t.Errorf("OllamaURL = %q, want http://localhost:11434", cfg.OllamaURL)
+	}
+}
+
+func TestLoad_ModelsListAll(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"true", true},
+		{"1", true},
+		{"false", false},
+		{"0", false},
+	}
+	for _, tc := range cases {
+		t.Run("MODELS_LIST_ALL="+tc.value, func(t *testing.T) {
+			t.Setenv("ADMIN_KEY", "key")
+			t.Setenv("DATABASE_URL", "postgres://localhost/db")
+			t.Setenv("MODELS_LIST_ALL", tc.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.ModelsListAll != tc.want {
+				t.Errorf("ModelsListAll = %v, want %v", cfg.ModelsListAll, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_ModelsListAll_RejectsInvalid(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("MODELS_LIST_ALL", "yes-please")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for invalid MODELS_LIST_ALL")
 	}
 }
 

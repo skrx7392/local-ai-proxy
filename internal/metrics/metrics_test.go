@@ -84,7 +84,7 @@ func TestHandler_ExposesNewMetricNames(t *testing.T) {
 
 func TestRecordTokens_NilSafe(t *testing.T) {
 	var m *Metrics
-	m.RecordTokens("llama3.1:8b", 100, 200)
+	m.RecordTokens("llama3.1:8b", "n1", 100, 200)
 	m.RecordCreditGateReject()
 	m.RecordRateLimitReject()
 	m.RecordUsageDrop()
@@ -96,15 +96,33 @@ func TestRecordTokens_NilSafe(t *testing.T) {
 
 func TestRecordTokens_IncrementsCounters(t *testing.T) {
 	m := New(func() int { return 0 })
-	m.RecordTokens("llama3.1:8b", 100, 200)
+	m.RecordTokens("llama3.1:8b", "n1", 100, 200)
 
-	prompt := testutil.ToFloat64(m.TokensTotal.WithLabelValues("llama3.1:8b", "prompt"))
+	prompt := testutil.ToFloat64(m.TokensTotal.WithLabelValues("llama3.1:8b", "prompt", "n1"))
 	if prompt != 100 {
 		t.Errorf("expected prompt tokens 100, got %v", prompt)
 	}
-	completion := testutil.ToFloat64(m.TokensTotal.WithLabelValues("llama3.1:8b", "completion"))
+	completion := testutil.ToFloat64(m.TokensTotal.WithLabelValues("llama3.1:8b", "completion", "n1"))
 	if completion != 200 {
 		t.Errorf("expected completion tokens 200, got %v", completion)
+	}
+}
+
+// TestRecordTokens_PerNodeSeries verifies the tokens counter is partitioned
+// by node: the same model served by two nodes yields two distinct series.
+func TestRecordTokens_PerNodeSeries(t *testing.T) {
+	m := New(func() int { return 0 })
+	m.RecordTokens("llama3.1:8b", "n1", 10, 5)
+	m.RecordTokens("llama3.1:8b", "n2", 20, 8)
+
+	if got := testutil.ToFloat64(m.TokensTotal.WithLabelValues("llama3.1:8b", "prompt", "n1")); got != 10 {
+		t.Errorf("n1 prompt tokens = %v, want 10", got)
+	}
+	if got := testutil.ToFloat64(m.TokensTotal.WithLabelValues("llama3.1:8b", "prompt", "n2")); got != 20 {
+		t.Errorf("n2 prompt tokens = %v, want 20", got)
+	}
+	if got := testutil.ToFloat64(m.TokensTotal.WithLabelValues("llama3.1:8b", "completion", "n2")); got != 8 {
+		t.Errorf("n2 completion tokens = %v, want 8", got)
 	}
 }
 

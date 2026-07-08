@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -23,8 +22,11 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/logging"
 	appmetrics "github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/middleware"
+	"github.com/krishna/local-ai-proxy/internal/nodesource"
+	"github.com/krishna/local-ai-proxy/internal/poller"
 	"github.com/krishna/local-ai-proxy/internal/proxy"
 	"github.com/krishna/local-ai-proxy/internal/ratelimit"
+	"github.com/krishna/local-ai-proxy/internal/registry"
 	"github.com/krishna/local-ai-proxy/internal/requestid"
 	"github.com/krishna/local-ai-proxy/internal/store"
 	"github.com/krishna/local-ai-proxy/internal/user"
@@ -81,18 +83,20 @@ func main() {
 	}
 	slog.SetDefault(logger)
 
-	ollamaURL, err := url.Parse(cfg.OllamaURL)
-	if err != nil {
-		slog.Error("invalid OLLAMA_URL", "error", err)
-		os.Exit(1)
-	}
-
 	db, err := store.New(context.Background(), cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("store error", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	// Reconcile declared nodes (NODES_FILE + OLLAMA_URL synthesis) into the
+	// store before anything reads the node set. Fail fast: an invalid
+	// declaration file must not boot a proxy with a partial node set.
+	if err := nodesource.SyncDeclaredNodes(context.Background(), db, cfg); err != nil {
+		slog.Error("node sync error", "error", err)
+		os.Exit(1)
+	}
 
 	startTime := time.Now()
 
@@ -166,8 +170,24 @@ func main() {
 		6*time.Hour, 30*24*time.Hour, // cleanup old holds every 6 hrs
 	)
 
+	// Node routing: registry + health poller. The synchronous startup sweep
+	// probes all enabled nodes in parallel (bounded budget) BEFORE the HTTP
+	// listener opens, so restarts route deterministically; the poller keeps
+	// health and model lists current afterwards and maintains both
+	// aiproxy_node_up{node} and the legacy aiproxy_ollama_up gauge (it is
+	// the sole writer of the latter).
+	reg := registry.New()
+	nodePoller := poller.New(db, reg, m, poller.Options{})
+	pollerCtx, pollerCancel := context.WithCancel(context.Background())
+	defer pollerCancel()
+	if err := nodePoller.SweepOnce(pollerCtx); err != nil {
+		slog.Error("node startup sweep error", "error", err)
+		os.Exit(1)
+	}
+
 	limiter := ratelimit.New()
-	proxyHandler := proxy.NewHandler(ollamaURL, usageCh, cfg.MaxRequestBody, db, m)
+	proxyHandler := proxy.NewHandler(reg, usageCh, cfg.MaxRequestBody, db, m,
+		proxy.Options{ModelsListAll: cfg.ModelsListAll})
 	authMiddleware := auth.Middleware(db)
 	creditGate := credits.CreditGate(db, m)
 	rateLimitMiddleware := ratelimit.Middleware(limiter, m)
@@ -187,10 +207,13 @@ func main() {
 	// own 50MB cap (MAX_REQUEST_BODY).
 	jsonBody := middleware.MaxBody(cfg.MaxJSONBody)
 
-	hc := health.NewChecker(db, cfg.OllamaURL, func() int { return len(usageCh) }, cap(usageCh))
-	hc.SetOllamaGauge(m.OllamaUp)
+	// Readiness derives node health from the registry snapshot — no
+	// synchronous probes. The aiproxy_ollama_up gauge is owned by the node
+	// poller now; wiring the checker to it too would create two writers.
+	hc := health.NewChecker(db, reg, func() int { return len(usageCh) }, cap(usageCh))
 
 	configSnapshot := admin.ConfigSnapshot{
+		// Raw OLLAMA_URL value; empty when unset (no synthesized node).
 		OllamaURL:                        cfg.OllamaURL,
 		Port:                             cfg.Port,
 		LogLevel:                         cfg.LogLevel,
@@ -210,6 +233,7 @@ func main() {
 		Version:                          version,
 		BuildTime:                        buildTime,
 		GoVersion:                        runtime.Version(),
+		ModelsListAll:                    cfg.ModelsListAll,
 	}
 
 	adminHandler := admin.NewHandler(db, cfg.AdminKey, usageCh, admin.Options{
@@ -263,6 +287,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Start the ongoing node poll loop (the startup sweep already ran);
+	// returns when pollerCtx is cancelled during shutdown.
+	go nodePoller.Run(pollerCtx)
+
 	go func() {
 		slog.Info("proxy listening", "port", cfg.Port, "version", version, "build_time", buildTime)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -278,7 +306,8 @@ func main() {
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
 
-	// Stop sweeper goroutines
+	// Stop node poller and sweeper goroutines
+	pollerCancel()
 	sweeperCancel()
 
 	// Stop usage writer and drain

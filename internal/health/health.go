@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/krishna/local-ai-proxy/internal/registry"
 )
 
 // Pinger is satisfied by *store.Store or any type with a Ping method.
@@ -14,28 +14,30 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
+// NodeSnapshotter exposes the node registry's current state. Satisfied by
+// *registry.Registry. Readiness reads the snapshot only — it never probes
+// backends synchronously; the health poller owns probing.
+type NodeSnapshotter interface {
+	Snapshot() registry.RegistrySnapshot
+}
+
 // Checker holds dependencies for health check endpoints.
 type Checker struct {
 	db         Pinger
-	ollamaURL  string
+	nodes      NodeSnapshotter
 	usageChLen func() int
 	usageChCap int
-	ollamaUp   prometheus.Gauge // nil-safe
 }
 
-// NewChecker creates a health Checker. Any parameter can be nil/zero to skip that check.
-func NewChecker(db Pinger, ollamaURL string, usageChLen func() int, usageChCap int) *Checker {
+// NewChecker creates a health Checker. Any parameter can be nil/zero to skip
+// that check.
+func NewChecker(db Pinger, nodes NodeSnapshotter, usageChLen func() int, usageChCap int) *Checker {
 	return &Checker{
 		db:         db,
-		ollamaURL:  ollamaURL,
+		nodes:      nodes,
 		usageChLen: usageChLen,
 		usageChCap: usageChCap,
 	}
-}
-
-// SetOllamaGauge sets the prometheus gauge that will be updated on readiness checks.
-func (c *Checker) SetOllamaGauge(g prometheus.Gauge) {
-	c.ollamaUp = g
 }
 
 // LiveHandler returns 200 OK unconditionally. Used for k8s liveness probes.
@@ -50,13 +52,23 @@ type CheckResult struct {
 	Status    string `json:"status"`
 	LatencyMs *int64 `json:"latency_ms,omitempty"`
 	Error     string `json:"error,omitempty"`
+	Detail    string `json:"detail,omitempty"`
 	Depth     *int   `json:"queue_depth,omitempty"`
 	Capacity  *int   `json:"queue_capacity,omitempty"`
+	Total     *int   `json:"total,omitempty"`
+	Healthy   *int   `json:"healthy,omitempty"`
 }
 
 // RunChecks executes every configured probe and returns whether all passed
-// plus per-component results, keyed by the spec's component name (db, ollama,
-// usage_writer). Side-effect: updates the ollamaUp gauge when set.
+// plus per-component results, keyed by the spec's component name (db, nodes,
+// usage_writer).
+//
+// The nodes rule (docs/design/distributed-nodes.md, "Readiness"):
+// ready = zero enabled nodes OR at least one healthy node. Zero enabled
+// nodes is deliberately OK — a fresh install must serve the admin API to
+// register its first node — flagged with a "no nodes configured" detail.
+// Unprobed (unknown) nodes count the same as unhealthy ones. Per-node
+// breakdown is an admin concern (BE-7), not readiness's.
 func (c *Checker) RunChecks(ctx context.Context) (allOK bool, checks map[string]CheckResult) {
 	checks = map[string]CheckResult{}
 	allOK = true
@@ -76,25 +88,25 @@ func (c *Checker) RunChecks(ctx context.Context) (allOK bool, checks map[string]
 		}
 	}
 
-	if c.ollamaURL != "" {
-		start := time.Now()
-		client := &http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Head(c.ollamaURL)
-		ms := time.Since(start).Milliseconds()
-
-		if err != nil {
-			allOK = false
-			checks["ollama"] = CheckResult{Status: "error", LatencyMs: &ms, Error: err.Error()}
-			if c.ollamaUp != nil {
-				c.ollamaUp.Set(0)
-			}
-		} else {
-			resp.Body.Close()
-			checks["ollama"] = CheckResult{Status: "ok", LatencyMs: &ms}
-			if c.ollamaUp != nil {
-				c.ollamaUp.Set(1)
+	if c.nodes != nil {
+		snap := c.nodes.Snapshot()
+		total := len(snap.Nodes)
+		healthy := 0
+		for _, ns := range snap.Nodes {
+			if ns.Health == registry.HealthHealthy {
+				healthy++
 			}
 		}
+		result := CheckResult{Status: "ok", Total: &total, Healthy: &healthy}
+		switch {
+		case total == 0:
+			result.Detail = "no nodes configured"
+		case healthy == 0:
+			allOK = false
+			result.Status = "error"
+			result.Error = "no healthy nodes"
+		}
+		checks["nodes"] = result
 	}
 
 	if c.usageChLen != nil {
@@ -112,8 +124,9 @@ func (c *Checker) RunChecks(ctx context.Context) (allOK bool, checks map[string]
 	return allOK, checks
 }
 
-// ReadyHandler checks DB, Ollama, and usage writer health. Used for k8s readiness probes.
-// Renames the db key to "database" for compatibility with existing probe consumers.
+// ReadyHandler checks DB, node registry, and usage writer health. Used for
+// k8s readiness probes. Renames the db key to "database" for compatibility
+// with existing probe consumers.
 func (c *Checker) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	allOK, checks := c.RunChecks(r.Context())
 

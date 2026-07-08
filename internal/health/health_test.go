@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/krishna/local-ai-proxy/internal/registry"
 )
 
 type mockPinger struct {
@@ -17,8 +19,27 @@ func (m *mockPinger) Ping(ctx context.Context) error {
 	return m.err
 }
 
+// stubNodes is a NodeSnapshotter returning a fixed registry snapshot.
+type stubNodes struct {
+	snap registry.RegistrySnapshot
+}
+
+func (s stubNodes) Snapshot() registry.RegistrySnapshot { return s.snap }
+
+// nodesWithHealth builds a snapshot with one node per given health state.
+func nodesWithHealth(healths ...registry.Health) stubNodes {
+	snap := registry.RegistrySnapshot{Models: map[string][]registry.Node{}}
+	for i, h := range healths {
+		snap.Nodes = append(snap.Nodes, registry.NodeState{
+			Node:   registry.Node{ID: int64(i + 1)},
+			Health: h,
+		})
+	}
+	return stubNodes{snap: snap}
+}
+
 func TestLiveHandler_AlwaysOK(t *testing.T) {
-	c := NewChecker(nil, "", nil, 0)
+	c := NewChecker(nil, nil, nil, 0)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/healthz/live", nil)
 
@@ -38,14 +59,9 @@ func TestLiveHandler_AlwaysOK(t *testing.T) {
 }
 
 func TestReadyHandler_AllHealthy(t *testing.T) {
-	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ollama.Close()
-
 	c := NewChecker(
 		&mockPinger{},
-		ollama.URL,
+		nodesWithHealth(registry.HealthHealthy),
 		func() int { return 5 },
 		1000,
 	)
@@ -75,9 +91,9 @@ func TestReadyHandler_AllHealthy(t *testing.T) {
 	if dbCheck["status"] != "ok" {
 		t.Errorf("expected database 'ok', got %v", dbCheck["status"])
 	}
-	ollamaCheck := checks["ollama"].(map[string]any)
-	if ollamaCheck["status"] != "ok" {
-		t.Errorf("expected ollama 'ok', got %v", ollamaCheck["status"])
+	nodesCheck := checks["nodes"].(map[string]any)
+	if nodesCheck["status"] != "ok" {
+		t.Errorf("expected nodes 'ok', got %v", nodesCheck["status"])
 	}
 	usageCheck := checks["usage_writer"].(map[string]any)
 	if usageCheck["status"] != "ok" {
@@ -86,14 +102,9 @@ func TestReadyHandler_AllHealthy(t *testing.T) {
 }
 
 func TestReadyHandler_DBDown(t *testing.T) {
-	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ollama.Close()
-
 	c := NewChecker(
 		&mockPinger{err: errors.New("connection refused")},
-		ollama.URL,
+		nodesWithHealth(registry.HealthHealthy),
 		func() int { return 0 },
 		1000,
 	)
@@ -119,10 +130,44 @@ func TestReadyHandler_DBDown(t *testing.T) {
 	}
 }
 
-func TestReadyHandler_OllamaDown(t *testing.T) {
+// Zero enabled nodes is READY: a fresh install must be able to serve the
+// admin API to register its first node.
+func TestReadyHandler_ZeroNodes_Ready(t *testing.T) {
 	c := NewChecker(
 		&mockPinger{},
-		"http://127.0.0.1:1", // connection refused
+		nodesWithHealth(), // empty snapshot
+		func() int { return 0 },
+		1000,
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/healthz/ready", nil)
+
+	c.ReadyHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for zero configured nodes, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["status"] != "ready" {
+		t.Errorf("expected 'ready', got %v", body["status"])
+	}
+	checks := body["checks"].(map[string]any)
+	nodesCheck := checks["nodes"].(map[string]any)
+	if nodesCheck["status"] != "ok" {
+		t.Errorf("expected nodes 'ok' with zero nodes, got %v", nodesCheck["status"])
+	}
+	if nodesCheck["detail"] != "no nodes configured" {
+		t.Errorf("expected 'no nodes configured' detail, got %v", nodesCheck["detail"])
+	}
+}
+
+func TestReadyHandler_AllNodesDown_NotReady(t *testing.T) {
+	c := NewChecker(
+		&mockPinger{},
+		nodesWithHealth(registry.HealthUnhealthy, registry.HealthUnhealthy),
 		func() int { return 0 },
 		1000,
 	)
@@ -133,27 +178,68 @@ func TestReadyHandler_OllamaDown(t *testing.T) {
 	c.ReadyHandler(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503, got %d", rec.Code)
+		t.Errorf("expected 503 when all nodes are down, got %d", rec.Code)
 	}
 
 	var body map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["status"] != "not_ready" {
+		t.Errorf("expected 'not_ready', got %v", body["status"])
+	}
 	checks := body["checks"].(map[string]any)
-	ollamaCheck := checks["ollama"].(map[string]any)
-	if ollamaCheck["status"] != "error" {
-		t.Errorf("expected ollama 'error', got %v", ollamaCheck["status"])
+	nodesCheck := checks["nodes"].(map[string]any)
+	if nodesCheck["status"] != "error" {
+		t.Errorf("expected nodes 'error', got %v", nodesCheck["status"])
+	}
+}
+
+func TestReadyHandler_OneHealthyNode_Ready(t *testing.T) {
+	c := NewChecker(
+		&mockPinger{},
+		nodesWithHealth(registry.HealthUnhealthy, registry.HealthHealthy, registry.HealthUnknown),
+		func() int { return 0 },
+		1000,
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/healthz/ready", nil)
+
+	c.ReadyHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 with one healthy node, got %d", rec.Code)
+	}
+	var body map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["status"] != "ready" {
+		t.Errorf("expected 'ready', got %v", body["status"])
+	}
+}
+
+// Unprobed (unknown) nodes are treated identically to unhealthy ones: not
+// counted toward readiness.
+func TestReadyHandler_UnknownOnly_NotReady(t *testing.T) {
+	c := NewChecker(
+		&mockPinger{},
+		nodesWithHealth(registry.HealthUnknown),
+		func() int { return 0 },
+		1000,
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/healthz/ready", nil)
+
+	c.ReadyHandler(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when the only node is unprobed, got %d", rec.Code)
 	}
 }
 
 func TestReadyHandler_UsageChannelFull(t *testing.T) {
-	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ollama.Close()
-
 	c := NewChecker(
 		&mockPinger{},
-		ollama.URL,
+		nodesWithHealth(registry.HealthHealthy),
 		func() int { return 1000 }, // full
 		1000,
 	)
