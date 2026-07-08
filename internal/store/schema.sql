@@ -187,3 +187,34 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_column THEN
     NULL;
 END $$;
+
+-- Distributed backend nodes (inference backends the gateway routes to).
+-- Rows are never hard-deleted: usage_logs references them; DELETE on the
+-- admin API maps to enabled=FALSE (repo soft-delete convention).
+CREATE TABLE IF NOT EXISTS nodes (
+    id            BIGSERIAL PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    base_url      TEXT NOT NULL,
+    backend_type  TEXT NOT NULL DEFAULT 'ollama'
+                  CHECK (backend_type IN ('ollama', 'openai_compat')),
+    auth_header   TEXT,            -- optional Authorization value sent to the node
+    static_models TEXT[],          -- non-NULL disables model discovery; exact list
+    health_path   TEXT,            -- optional liveness-probe path override
+    timeout_seconds INTEGER        -- optional per-node request timeout (NULL = default)
+                  CHECK (timeout_seconds IS NULL OR timeout_seconds > 0),
+    enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+    source        TEXT NOT NULL DEFAULT 'api'
+                  CHECK (source IN ('api', 'config')),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Node attribution on usage logs (historical rows stay NULL)
+DO $$ BEGIN
+    ALTER TABLE usage_logs ADD COLUMN node_id BIGINT REFERENCES nodes(id);
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_usage_logs_node_created
+    ON usage_logs(node_id, created_at);

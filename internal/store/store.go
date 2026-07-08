@@ -79,6 +79,7 @@ type UsageEntry struct {
 	DurationMs       int64
 	Status           string  // completed | partial | error
 	CreditsCharged   float64 // 0 when no hold/pricing was active
+	NodeID           *int64  // nil = request never resolved a node
 }
 
 type UsageStat struct {
@@ -386,10 +387,10 @@ func (s *Store) RevokeKey(id int64) error {
 func (s *Store) LogUsage(entry UsageEntry) error {
 	_, err := s.pool.Exec(
 		context.Background(),
-		`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, node_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		entry.APIKeyID, entry.Model, entry.PromptTokens, entry.CompletionTokens,
-		entry.TotalTokens, entry.DurationMs, entry.Status, entry.CreditsCharged,
+		entry.TotalTokens, entry.DurationMs, entry.Status, entry.CreditsCharged, entry.NodeID,
 	)
 	return err
 }
