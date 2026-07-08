@@ -1,16 +1,31 @@
 # local-ai-proxy
 
-An OpenAI-compatible reverse proxy to Ollama with API key authentication, per-key rate limiting, usage tracking, and user management. Deployed to k3s at `ai.kinvee.in/api`. All routes are under the `/api` prefix, leaving `ai.kinvee.in/` free for the frontend.
+An OpenAI-compatible gateway for self-hosted inference: API key authentication, per-key rate limiting, credit-based usage accounting, user management, and model-aware routing across multiple backend nodes (Ollama or any OpenAI-compatible server). All routes are under the `/api` prefix, leaving the root path free for a frontend.
 
 ## Architecture
 
 ```
-Client → RequestID → CORS → Auth → CreditGate → RateLimit → Proxy → Ollama
-                                                                ↓
-                                                    Async Usage Logger → PostgreSQL
+Client → RequestID → CORS → Auth → CreditGate → RateLimit → Proxy
+                                                              │ Resolve(model)
+                                                              ▼
+                                                        Node Registry ──► Node "workstation" (ollama)
+                                                              │      ──► Node "gpu-box"     (ollama)
+                                                              │      ──► Node "cloud"       (openai_compat)
+                                                              ▼
+                                                  Async Usage Logger → PostgreSQL
 ```
 
-Internal packages: `config`, `auth`, `store`, `ratelimit`, `proxy`, `middleware`, `admin`, `user`, `credits`, `logging`, `requestid`, `health`, `metrics`, `apierror` — all using stdlib `net/http`, no frameworks.
+The gateway routes each chat request **by model name** to a healthy backend node:
+
+- **Node registry** (`internal/registry`) — an in-memory model→nodes routing map, published as an immutable snapshot (`atomic.Pointer`, copy-on-write). Multiple healthy nodes serving the same model are round-robined.
+- **Health poller** (`internal/poller`) — probes every enabled node on a ~15s interval (±20% deterministic per-node jitter, 5s per-probe timeout, 1MB response cap, redirects refused). For `ollama` nodes one `GET {base_url}/api/tags` request is both liveness check and model discovery; for `openai_compat` nodes it is `GET {base_url}/v1/models`. Nodes with `static_models` are only health-checked (2xx = alive) and their configured list stays authoritative.
+- **Startup discovery sweep** — before the HTTP listener opens, all enabled nodes are probed in parallel under a bounded budget (5s per probe, ~6s overall), so restarts route deterministically. There is no optimistic routing: a node is only routable once a probe (or its static list) has established what it serves.
+- **Health hysteresis** — in the running poller a node goes `healthy → unhealthy` only after **2 consecutive probe failures** (no flapping on one timeout); any success is immediately healthy. The startup sweep and admin-triggered probes are decisive on a single failure.
+- **Immediate probe on admin writes** — creating, updating, or refreshing a node via the admin API probes it synchronously before the response returns; deleting a node removes it from routing before the response returns.
+
+Everything else — auth, credits, rate limiting, usage accounting — stays in the gateway against the single shared Postgres. There is exactly one gateway process by design (see Known Gaps).
+
+Internal packages: `config`, `auth`, `authlimit`, `store`, `ratelimit`, `proxy`, `registry`, `poller`, `nodesource`, `middleware`, `admin`, `user`, `credits`, `bootstrap`, `logging`, `requestid`, `health`, `metrics`, `apierror` — all using stdlib `net/http`, no frameworks.
 
 ## Endpoints
 
@@ -18,17 +33,19 @@ Internal packages: `config`, `auth`, `store`, `ratelimit`, `proxy`, `middleware`
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/v1/chat/completions` | Proxied to Ollama with usage tracking (streaming + non-streaming) |
-| `GET` | `/api/v1/models` | Lists models with active pricing |
+| `POST` | `/api/v1/chat/completions` | Routed to a healthy node serving the requested model (streaming + non-streaming), with usage tracking |
+| `GET` | `/api/v1/models` | Lists models with active pricing **and** at least one healthy node serving them (set `MODELS_LIST_ALL=true` to list the full priced catalog); `owned_by` is the node name, or `multiple` |
 
 ### Health & Observability
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/healthz/live` | Liveness probe — always 200 |
-| `GET` | `/api/healthz/ready` | Readiness probe — checks DB, Ollama, usage writer |
+| `GET` | `/api/healthz/ready` | Readiness probe — checks DB, node registry, usage writer (see below) |
 | `GET` | `/api/healthz` | Alias for `/api/healthz/live` (backward compat) |
 | `GET` | `/metrics` | Prometheus metrics endpoint |
+
+Readiness = DB ok **and** usage writer ok **and** (*zero enabled nodes* **or** *at least one healthy node*). Zero enabled nodes is deliberately *ready* — a fresh install must be able to serve the admin API to register its first node (the `nodes` check reports `"detail": "no nodes configured"`). Readiness reads the registry snapshot only; it never probes backends synchronously.
 
 ### Auth API (public + session-authenticated)
 
@@ -50,49 +67,121 @@ Internal packages: `config`, `auth`, `store`, `ratelimit`, `proxy`, `middleware`
 | `DELETE` | `/api/users/keys/{id}` | Revoke user's API key |
 | `GET` | `/api/users/usage` | Get usage stats for user's keys |
 
-### Admin (authenticated via `X-Admin-Key` header, rate limited to 10 req/min)
+### Admin (authenticated via `X-Admin-Key` header — rate limited to 10 req/min — or an admin Bearer session)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/admin/keys` | Create API key (`{name, rate_limit}`) — returns full key once, never retrievable again |
 | `GET` | `/api/admin/keys` | List all keys (id, name, key_prefix, rate_limit, created_at, revoked) |
+| `GET` | `/api/admin/keys/{id}` | Key detail |
+| `PUT` | `/api/admin/keys/{id}/rate-limit` | Update a key's rate limit |
+| `PUT` | `/api/admin/keys/{id}/session-limit` | Set/clear a key's session token limit |
 | `DELETE` | `/api/admin/keys/{id}` | Revoke (soft-delete) a key |
-| `GET` | `/api/admin/usage` | Aggregated usage stats (filterable by `key_id` and `since`) |
+| `GET` | `/api/admin/usage` | Aggregated usage stats (filterable by `key_id`, `since`, and `node_id`) |
+| `GET` | `/api/admin/usage/summary` \| `/by-model` \| `/by-user` \| `/timeseries` | Usage analytics |
 | `GET` | `/api/admin/users` | List all users |
-| `PUT` | `/api/admin/users/{id}/activate` | Activate a user account |
-| `PUT` | `/api/admin/users/{id}/deactivate` | Deactivate a user account |
+| `GET` | `/api/admin/users/{id}` | User detail |
+| `PUT` | `/api/admin/users/{id}/activate` \| `/deactivate` \| `/role` | User mutations |
+| `GET` | `/api/admin/accounts` | List accounts (credit balances) |
+| `POST` | `/api/admin/accounts/{id}/credits` | Grant credits |
+| `POST` | `/api/admin/accounts/{id}/keys` | Create a key bound to an account |
+| `GET`/`POST` | `/api/admin/pricing` | List / upsert model pricing (`{model_id, prompt_rate, completion_rate, typical_completion}`) |
+| `DELETE` | `/api/admin/pricing/{id}` | Deactivate pricing |
+| `GET`/`POST`/`DELETE` | `/api/admin/registration-tokens` | Manage service-registration tokens |
+| `GET` | `/api/admin/registrations` | Registration audit feed |
+| `GET` | `/api/admin/config` | Effective config snapshot (includes `models_list_all`, `nodes_file`) |
+| `GET` | `/api/admin/health` | Component health: db, **nodes** (total/healthy counts), usage writer, uptime |
+| `POST` | `/api/admin/bootstrap` | One-time first-admin bootstrap (404 unless `ADMIN_BOOTSTRAP_TOKEN` is set) |
+
+#### Node management
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/admin/nodes` | Register a node `{name, base_url, backend_type?, auth_header?, static_models?, health_path?, timeout_seconds?}` — probed synchronously; the 201 response includes initial health |
+| `GET` | `/api/admin/nodes` | List nodes: stored config joined with live state |
+| `GET` | `/api/admin/nodes/{id}` | Node detail |
+| `PUT` | `/api/admin/nodes/{id}` | Update mutable fields (API-sourced nodes only), then re-probe synchronously |
+| `DELETE` | `/api/admin/nodes/{id}` | Disable the node (soft-delete) and remove it from routing before returning (204) |
+| `POST` | `/api/admin/nodes/{id}/refresh` | Force an immediate probe + model rediscovery |
+
+Response conventions:
+
+- List and detail responses use the `{"data": ...}` envelope (lists add `"pagination": {limit, offset, total}`). `?envelope=0` opts out for one deprecation release.
+- `auth_header` is always **masked** in responses (e.g. `"Bearer sk-…abcd"`) — the raw value is write-only.
+- Every node response carries live state alongside stored config: `health` (`healthy` / `unhealthy` / `unknown`), `models` (discovered or static list), `last_error`, `last_checked_at`.
+- `PUT` is PATCH-like — omitted fields keep their current value:
+  - `auth_header`: absent = keep, `""` = clear, value = replace
+  - `health_path`: absent = keep, `""` = clear, value = replace
+  - `static_models`: absent/null = keep, `[]` = clear (switch back to probe discovery), non-empty = replace
+  - `timeout_seconds`: absent = keep, `0` = clear (use the 5-minute default), positive = replace
+  - `enabled`: absent = keep; `true` re-enables a previously deleted node
+- Config-sourced nodes (from `NODES_FILE` / `OLLAMA_URL`) are **read-only via the API**: `PUT`/`DELETE` return `409 config_sourced_node` pointing at the file.
+
+## Node registration
+
+Nodes come from two coexisting sources: a static JSON file (`NODES_FILE`, the compose/self-hoster path) and the admin API (the dynamic path).
+
+### `NODES_FILE`
+
+```json
+{
+  "nodes": [
+    { "name": "workstation", "base_url": "http://192.0.2.10:11434", "backend_type": "ollama",
+      "timeout_seconds": 900 },
+    { "name": "gpu-box", "base_url": "http://ollama.example.internal:11434", "backend_type": "ollama" },
+    { "name": "cloud", "base_url": "https://api.example.com", "backend_type": "openai_compat",
+      "auth_header": "Bearer ${CLOUD_KEY}", "static_models": ["gpt-4o-mini"] }
+  ]
+}
+```
+
+- `${VAR}` references (braced form only) in any string value are expanded from the environment at load time, so secrets stay out of the file. Referencing an **undefined** variable fails startup with an error naming the variable.
+- The file is parsed strictly: unknown fields, duplicate node names, and trailing data after the JSON document all fail startup fast.
+- `backend_type` defaults to `"ollama"`. `static_models` (non-empty) disables discovery — the list is authoritative and the node is only health-checked (`health_path` if set, else the backend type's discovery endpoint; only the status code is used).
+- `base_url` is the backend's **API root, excluding the `/v1` segment** — the gateway path-joins `/v1/chat/completions`, `/v1/models`, or `/api/tags` onto it (a prefix like `https://host/openai` is preserved). Scheme must be `http`/`https`; userinfo, query, and fragment are rejected; a `base_url` ending in `/v1` is rejected with a hint.
+
+**Merge semantics at startup** (idempotent):
+
+- Declared nodes are upserted by `name` with `source="config"`.
+- Config-sourced nodes in the DB that are no longer declared are **disabled** (never hard-deleted; usage rows reference them).
+- API-sourced nodes are never touched by file loading — but a `name` collision between the file and an API-sourced node **fails startup** with a clear error.
+
+### `OLLAMA_URL` (single-node shortcut) — breaking change
+
+> **BREAKING**: the implicit `http://localhost:11434` default is **gone**. Older releases assumed a localhost Ollama when `OLLAMA_URL` was unset; now an unset `OLLAMA_URL` means **zero nodes**. If you relied on the implicit default, set `OLLAMA_URL=http://localhost:11434` explicitly — one line.
+
+- `OLLAMA_URL` explicitly set → a config-sourced node named `default` (`backend_type: "ollama"`) is synthesized from it at startup and merges exactly like a file node. Existing single-node deployments that set the variable upgrade with zero config changes. (Declaring another node named `default` in `NODES_FILE` at the same time is a startup error.)
+- `OLLAMA_URL` unset → no synthesis, ever. A `NODES_FILE`-only install gets exactly the nodes it declared; a fresh install starts with zero nodes — which is *ready*, so the admin API is available to register the first node via `POST /api/admin/nodes`. Chat requests return `503 model_unavailable` until a node serves the requested model.
 
 ## Request Flow
 
+The middleware chain (auth → credit gate → rate limit) runs before routing, so `401`/`402`/`429` always precede `503 model_unavailable`. Within the proxy handler, order matters:
+
+1. Body read into memory (capped by `MAX_REQUEST_BODY`) and validated: malformed JSON or a missing/empty `model` → `400` (OpenAI-shaped `invalid_request_error`).
+2. Pricing check (credit-backed keys only): unpriced model → `400 unknown_model`; session token limit checked.
+3. **`Resolve(model)`** against the registry snapshot: no healthy node serving the model → `503 model_unavailable`. Resolution happens **before** any credit hold, so node outages cause zero hold churn.
+4. Credits reserved (credit-backed keys only).
+5. Forward to `{node.base_url}/v1/chat/completions` with the node's `auth_header` (the client's own `Authorization` is stripped and never forwarded) under the node's timeout budget (`timeout_seconds`, default 5 minutes, applied as a per-request context deadline).
+
+The upstream client never follows redirects (a redirect with `auth_header` attached could exfiltrate node credentials — a redirecting upstream fails the request), and non-streaming/error response bodies are read through the `MAX_REQUEST_BODY` cap.
+
 ### Non-Streaming (`stream=false` or omitted)
 
-1. Request passes through CORS, auth, and rate limit middleware
-2. Request body read into memory (capped by `MAX_REQUEST_BODY`)
-3. Body peeked to extract model name and stream flag
-4. Reverse proxy forwards to Ollama
-5. `ModifyResponse` hook intercepts response, parses JSON for token usage
-6. Usage entry sent to async channel (non-blocking; drops if buffer full)
-7. Response written to client unchanged
+Response body read (capped), token usage parsed from the JSON, credits settled against the hold, usage entry queued, response written to the client unchanged.
 
 ### Streaming (`stream=true`)
 
-1. Request passes through middleware, body peeked for model name
-2. Direct HTTP connection established to Ollama
-3. Response streamed line-by-line via `bufio.Reader`
-4. Each `data: {...}` line observed for usage object (non-destructive parsing)
-5. Lines flushed to client immediately for SSE delivery
-6. On EOF/error, status logged as completed, partial, or error
-7. Usage entry sent to async channel
+Response streamed line-by-line via `bufio.Reader`; each `data: {...}` line is observed for a usage object (non-destructive) and flushed to the client immediately for SSE delivery. On EOF/error, status is logged as completed, partial, or error; credits settled from observed (or byte-estimated) usage.
 
 ### Async Usage Logging
 
-All requests write to a buffered channel (capacity 1000). A dedicated goroutine drains the channel and calls `store.LogUsage()`. On shutdown, the channel is closed and remaining entries are drained.
+All requests write to a buffered channel (capacity 1000). A dedicated goroutine drains the channel and calls `store.LogUsage()`. Every entry records the `node_id` of the node that served it (NULL when no node was resolved). On shutdown, the channel is closed and remaining entries are drained.
 
 ## Database
 
 PostgreSQL via pgx/v5 connection pool. Schema auto-migrated on startup via embedded SQL.
 
-### Schema
+### Schema (excerpt — see `internal/store/schema.sql` for the full schema, including accounts, credits, pricing, and sessions)
 
 ```sql
 api_keys (
@@ -103,7 +192,8 @@ api_keys (
   rate_limit  INTEGER NOT NULL DEFAULT 60,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   revoked     BOOLEAN NOT NULL DEFAULT FALSE,
-  user_id     BIGINT REFERENCES users(id)  -- NULL = legacy admin-created key
+  user_id     BIGINT REFERENCES users(id),  -- NULL = admin-created key
+  account_id  BIGINT REFERENCES accounts(id) -- NULL = key not credit-backed
 )
 
 usage_logs (
@@ -115,7 +205,26 @@ usage_logs (
   total_tokens      INTEGER NOT NULL DEFAULT 0,
   duration_ms       BIGINT NOT NULL DEFAULT 0,
   status            TEXT NOT NULL DEFAULT 'completed',
+  node_id           BIGINT REFERENCES nodes(id), -- node attribution; NULL = pre-routing rows
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
+
+nodes (
+  id            BIGSERIAL PRIMARY KEY,
+  name          TEXT NOT NULL UNIQUE,
+  base_url      TEXT NOT NULL,
+  backend_type  TEXT NOT NULL DEFAULT 'ollama'
+                CHECK (backend_type IN ('ollama', 'openai_compat')),
+  auth_header   TEXT,            -- optional Authorization value sent to the node
+  static_models TEXT[],          -- non-NULL disables model discovery; exact list
+  health_path   TEXT,            -- optional liveness-probe path override
+  timeout_seconds INTEGER        -- optional per-node request timeout (NULL = default)
+                CHECK (timeout_seconds IS NULL OR timeout_seconds > 0),
+  enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+  source        TEXT NOT NULL DEFAULT 'api'
+                CHECK (source IN ('api', 'config')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 
 users (
@@ -128,15 +237,9 @@ users (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
-
-user_sessions (
-  id         BIGSERIAL PRIMARY KEY,
-  user_id    BIGINT NOT NULL REFERENCES users(id),
-  token_hash TEXT NOT NULL UNIQUE,
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-)
 ```
+
+Discovered model lists are deliberately **not** persisted — they are runtime state, re-derived by the startup sweep and the poller (`static_models` covers nodes where discovery is undesired).
 
 ## Configuration
 
@@ -146,10 +249,14 @@ All configuration via environment variables:
 |----------|---------|-------------|
 | `ADMIN_KEY` | *(required)* | Admin API authentication key |
 | `DATABASE_URL` | *(required)* | PostgreSQL connection string |
-| `OLLAMA_URL` | *(none)* | Optional single-node shortcut: when set, a config-sourced node named `default` is synthesized from it at startup; unset means no synthesized node (a fresh install starts with zero nodes and chat requests 503 until a node is registered) |
+| `OLLAMA_URL` | *(none)* | Optional single-node shortcut: when set, a config-sourced node named `default` is synthesized from it at startup; when unset there is **no** synthesized node — a fresh install starts with zero nodes (see Node registration; the old localhost default is gone) |
+| `NODES_FILE` | *(none)* | Path to a JSON node-declaration file (see Node registration) |
+| `MODELS_LIST_ALL` | `false` | `GET /v1/models` lists every actively priced model instead of the priced-AND-served intersection |
+| `ADMIN_BOOTSTRAP_TOKEN` | *(none)* | Enables `POST /api/admin/bootstrap` (one-time first-admin creation) when set |
+| `DEFAULT_CREDIT_GRANT` | `0` | Credits granted to newly registered accounts |
 | `PORT` | `8080` | Server listen port |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins |
-| `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes (chat proxy path) |
+| `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes (chat proxy path); also caps upstream non-streaming/error response reads |
 | `MAX_JSON_REQUEST_BODY` | `1048576` (1MB) | Max body size for JSON API endpoints (auth/users/accounts/admin) |
 | `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `AUTH_RATELIMIT_LOGIN_PER_MIN` | `5` | Login attempts per minute per client IP |
@@ -160,45 +267,49 @@ All configuration via environment variables:
 
 ## Deployment
 
-Multi-stage Docker build (`deploy/Dockerfile`) with k8s manifests in `deploy/k8s/`. CI/CD pipeline: GitHub Actions → Tailscale → SSH to dev server → Docker build → k3s rollout.
+Multi-stage Docker build (`deploy/Dockerfile`); a complete self-hosting example (gateway + Postgres + two Ollama nodes) lives in [`deploy/examples/`](deploy/examples/), and [`docs/deployment.md`](docs/deployment.md) covers multi-machine topologies (k3s, native macOS, overlay networks) and Ollama tuning. Reference k8s manifests are in `deploy/k8s/`.
 
 ```bash
 # Build
 CGO_ENABLED=0 go build -ldflags="-s -w" -o proxy ./cmd/proxy
 
-# Run
-ADMIN_KEY=your-key DATABASE_URL=postgres://... ./proxy
+# Run (single-node shortcut)
+ADMIN_KEY=your-key DATABASE_URL=postgres://... OLLAMA_URL=http://localhost:11434 ./proxy
 
 # Docker
-docker build -f deploy/Dockerfile -t ai-proxy .
+docker build -f deploy/Dockerfile -t local-ai-proxy .
 ```
+
+> Backends are unauthenticated by default (Ollama has no auth). Never expose a node on an untrusted network without a reverse proxy + token (`auth_header` supports this) or a private overlay network — see `docs/deployment.md`.
 
 ## Strengths
 
 - Clean package separation with proper middleware chaining
+- Model-aware routing across N backend nodes with health checking, discovery, and round-robin
 - Async usage logging via buffered channel — non-blocking to requests
 - Streaming SSE support with line-by-line token extraction
-- Auth strips Bearer token before forwarding to Ollama (no key leakage)
-- User registration and session management
-- Full k3s deployment pipeline
-- Test coverage across all packages
+- Upstream hardening: redirects refused, response caps, per-node timeouts, header-injection validation
+- Auth strips the client's Bearer token before forwarding (no key leakage); per-node `auth_header` for protected backends
+- User registration, session management, credit accounting
+- Test coverage across all packages (including `-race` on the registry)
 
 ## Known Gaps
 
 | Area | Issue |
 |------|-------|
 | Endpoints | Only chat completions + models; no embeddings, completions, or images |
-| Rate limiting | In-memory only — resets on restart |
-| Validation | Request body forwarded as-is, no schema checks |
-| Scale | Single replica, no multi-backend support |
+| Scale | Exactly one gateway replica by design — rate limiting is in-memory (correct with a single gateway, resets on restart); multi-gateway needs shared rate-limit state |
+| Routing | Round-robin only; no weighted/least-loaded balancing, model aliases, or fallback chains yet |
+| Nodes | Gateway must reach nodes over the network (inbound HTTP); no push-mode agents for NAT'd machines |
+| Validation | Model name and JSON shape are validated; the rest of the request body is forwarded as-is, no schema checks |
 | Storage | No backup strategy, soft-delete only (unbounded growth) |
-| Streaming | Token extraction is fragile — silently fails if Ollama changes SSE format |
+| Streaming | Token extraction is fragile — silently fails if a backend changes its SSE format |
 
 ## Observability
 
 ### Structured Logging
 
-All logs are JSON to stdout via `slog`, collected by Alloy and shipped to Loki. Every log entry within an HTTP request includes `request_id` automatically via a context-aware slog handler.
+All logs are JSON to stdout via `slog`, ready for any log collector. Every log entry within an HTTP request includes `request_id` automatically via a context-aware slog handler. Routing decisions are logged at debug level with `request_id`, `model`, and `node`; node health transitions are logged at info level.
 
 ### Request IDs
 
@@ -216,8 +327,9 @@ Available at `GET /metrics`. Key metrics:
 |--------|------|-------------|
 | `aiproxy_request_duration_seconds` | Histogram | HTTP request latency |
 | `aiproxy_requests_total` | Counter | Total HTTP requests |
-| `aiproxy_tokens_total` | Counter | Tokens processed (by model, prompt/completion) |
+| `aiproxy_tokens_total` | Counter | Tokens processed (by model, node, prompt/completion) |
+| `aiproxy_node_up` | Gauge | Per-node health (`{node="name"}`), updated on every probe |
+| `aiproxy_ollama_up` | Gauge | Legacy: OR of all node states (kept for one release, then removed) |
 | `aiproxy_credit_gate_rejects_total` | Counter | Requests rejected by credit gate |
 | `aiproxy_ratelimit_rejects_total` | Counter | Requests rejected by rate limiter |
 | `aiproxy_usage_channel_depth` | Gauge | Async usage channel depth |
-| `aiproxy_ollama_up` | Gauge | Ollama reachability (updated on readiness check) |
