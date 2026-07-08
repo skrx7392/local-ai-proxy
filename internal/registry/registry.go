@@ -156,11 +156,7 @@ func (r *Registry) SetNodeState(nodeID int64, health Health, models []string) {
 		return
 	}
 	e.health = health
-	if models == nil {
-		e.models = nil
-	} else {
-		e.models = append([]string(nil), models...)
-	}
+	e.models = cloneModels(models)
 	r.publishLocked()
 }
 
@@ -203,7 +199,7 @@ func (r *Registry) Snapshot() RegistrySnapshot {
 		out.Nodes[i] = NodeState{
 			Node:   ns.Node.clone(),
 			Health: ns.Health,
-			Models: append([]string(nil), ns.Models...),
+			Models: cloneModels(ns.Models),
 		}
 	}
 	for model, candidates := range s.models {
@@ -245,6 +241,18 @@ func (r *Registry) publishLocked() {
 	}
 
 	r.snap.Store(&snapshot{nodes: nodes, models: models})
+}
+
+// cloneModels copies a model list, preserving the nil-vs-empty distinction:
+// nil means "not yet discovered", a non-nil empty slice is a known-empty
+// list from a successful probe.
+func cloneModels(models []string) []string {
+	if models == nil {
+		return nil
+	}
+	out := make([]string, len(models))
+	copy(out, models)
+	return out
 }
 
 func sameURL(a, b *url.URL) bool {

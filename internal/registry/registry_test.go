@@ -282,6 +282,22 @@ func TestSetNodes_BaseURLChangeResetsHealth(t *testing.T) {
 	}
 }
 
+func TestSetNodeState_KnownEmptyModelListStaysNonNil(t *testing.T) {
+	// nil means "not yet discovered"; a successfully probed node serving
+	// zero models is a known-empty list and must stay distinguishable.
+	r := New()
+	r.SetNodes([]Node{testNode(t, 1, "idle", "http://idle:11434")})
+	r.SetNodeState(1, HealthHealthy, []string{})
+
+	snap := r.Snapshot()
+	if snap.Nodes[0].Models == nil {
+		t.Fatal("known-empty model list collapsed to nil (looks undiscovered)")
+	}
+	if len(snap.Nodes[0].Models) != 0 {
+		t.Fatalf("got models %v, want empty", snap.Nodes[0].Models)
+	}
+}
+
 func TestSetNodeState_UnknownNodeIgnored(t *testing.T) {
 	r := twoHealthyNodes(t)
 	r.SetNodeState(99, HealthHealthy, []string{"ghost-model"})
