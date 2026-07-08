@@ -22,7 +22,7 @@ func TestLogUsage_ChannelFull_IncrementsUsageDrops(t *testing.T) {
 	h := &handler{usageCh: usageCh, metrics: m}
 
 	key := &store.APIKey{ID: 1}
-	h.logUsage(key, usageData{Model: "llama3.1:8b"}, 0, "ok", 0)
+	h.logUsage(key, usageData{Model: "llama3.1:8b"}, 0, "ok", 0, nil)
 
 	if got := testutil.ToFloat64(m.UsageDrops); got != 1 {
 		t.Errorf("UsageDrops = %v, want 1 after drop", got)
@@ -37,7 +37,7 @@ func TestLogUsage_ChannelHasRoom_DoesNotIncrement(t *testing.T) {
 	h := &handler{usageCh: usageCh, metrics: m}
 
 	key := &store.APIKey{ID: 1}
-	h.logUsage(key, usageData{Model: "llama3.1:8b"}, 0, "ok", 0)
+	h.logUsage(key, usageData{Model: "llama3.1:8b"}, 0, "ok", 0, nil)
 
 	if got := testutil.ToFloat64(m.UsageDrops); got != 0 {
 		t.Errorf("UsageDrops = %v, want 0 when channel has room", got)

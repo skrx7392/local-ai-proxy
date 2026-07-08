@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/krishna/local-ai-proxy/internal/health"
+	"github.com/krishna/local-ai-proxy/internal/registry"
 	"github.com/krishna/local-ai-proxy/internal/store"
 )
 
@@ -23,7 +24,7 @@ func setupAdminWithObservability(
 	t *testing.T,
 	snap ConfigSnapshot,
 	startTime time.Time,
-	ollamaURL string,
+	nodes health.NodeSnapshotter,
 	usageDepth, usageCap int,
 ) http.Handler {
 	t.Helper()
@@ -58,7 +59,7 @@ func setupAdminWithObservability(
 	})
 
 	usageCh := make(chan store.UsageEntry, 100)
-	checker := health.NewChecker(s, ollamaURL, func() int { return usageDepth }, usageCap)
+	checker := health.NewChecker(s, nodes, func() int { return usageDepth }, usageCap)
 
 	return NewHandler(s, testAdminKey, usageCh, Options{
 		Snapshot:  snap,
@@ -88,23 +89,29 @@ func defaultSnap() ConfigSnapshot {
 		Version:                          "test-version",
 		BuildTime:                        "2026-04-14T00:00:00Z",
 		GoVersion:                        runtime.Version(),
+		ModelsListAll:                    false,
 	}
 }
 
-// stubOllama returns a 200-OK HEAD-friendly server so the ollama check stays
-// green during config/health tests. Callers Close() it via t.Cleanup.
-func stubOllama(t *testing.T) string {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-	return srv.URL
+// stubNodes is a health.NodeSnapshotter returning a fixed registry snapshot.
+type stubNodes struct {
+	snap registry.RegistrySnapshot
+}
+
+func (s stubNodes) Snapshot() registry.RegistrySnapshot { return s.snap }
+
+// healthyNodes returns a snapshotter with one healthy node so the nodes
+// check stays green during config/health tests.
+func healthyNodes() health.NodeSnapshotter {
+	return stubNodes{snap: registry.RegistrySnapshot{
+		Nodes:  []registry.NodeState{{Node: registry.Node{ID: 1, Name: "n1"}, Health: registry.HealthHealthy}},
+		Models: map[string][]registry.Node{},
+	}}
 }
 
 func TestConfig_RequiresAuth(t *testing.T) {
 	snap := defaultSnap()
-	h := setupAdminWithObservability(t, snap, time.Now(), stubOllama(t), 0, 1000)
+	h := setupAdminWithObservability(t, snap, time.Now(), healthyNodes(), 0, 1000)
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/config", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -115,7 +122,7 @@ func TestConfig_RequiresAuth(t *testing.T) {
 
 func TestConfig_ReturnsWhitelistedFields(t *testing.T) {
 	snap := defaultSnap()
-	h := setupAdminWithObservability(t, snap, time.Now(), stubOllama(t), 0, 1000)
+	h := setupAdminWithObservability(t, snap, time.Now(), healthyNodes(), 0, 1000)
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/config", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
@@ -149,6 +156,7 @@ func TestConfig_ReturnsWhitelistedFields(t *testing.T) {
 		"version":                                snap.Version,
 		"build_time":                             snap.BuildTime,
 		"go_version":                             snap.GoVersion,
+		"models_list_all":                        snap.ModelsListAll,
 	}
 	for k, want := range expected {
 		got, ok := body[k]
@@ -173,7 +181,7 @@ func TestConfig_ReturnsWhitelistedFields(t *testing.T) {
 }
 
 func TestHealth_RequiresAuth(t *testing.T) {
-	h := setupAdminWithObservability(t, defaultSnap(), time.Now(), stubOllama(t), 0, 1000)
+	h := setupAdminWithObservability(t, defaultSnap(), time.Now(), healthyNodes(), 0, 1000)
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/health", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -184,7 +192,7 @@ func TestHealth_RequiresAuth(t *testing.T) {
 
 func TestHealth_HappyPath(t *testing.T) {
 	snap := defaultSnap()
-	h := setupAdminWithObservability(t, snap, time.Now().Add(-90*time.Second), stubOllama(t), 0, 1000)
+	h := setupAdminWithObservability(t, snap, time.Now().Add(-90*time.Second), healthyNodes(), 0, 1000)
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/health", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()
@@ -213,7 +221,7 @@ func TestHealth_HappyPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("checks: expected object, got %T", body["checks"])
 	}
-	for _, k := range []string{"db", "ollama", "usage_writer"} {
+	for _, k := range []string{"db", "nodes", "usage_writer"} {
 		c, ok := checks[k].(map[string]any)
 		if !ok {
 			t.Errorf("missing check %q", k)
@@ -233,7 +241,7 @@ func TestHealth_HappyPath(t *testing.T) {
 }
 
 func TestHealth_DegradedWhenUsageWriterFull(t *testing.T) {
-	h := setupAdminWithObservability(t, defaultSnap(), time.Now(), stubOllama(t), 1000, 1000)
+	h := setupAdminWithObservability(t, defaultSnap(), time.Now(), healthyNodes(), 1000, 1000)
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/health", nil)
 	req.Header.Set("X-Admin-Key", testAdminKey)
 	rec := httptest.NewRecorder()

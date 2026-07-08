@@ -13,6 +13,10 @@ import (
 // admin_bootstrap_token) are deliberately absent — adding fields here is the
 // only way they reach the wire.
 type ConfigSnapshot struct {
+	// OllamaURL reports the raw OLLAMA_URL env value; empty when unset.
+	// Since node routing there is no implicit default — the value only
+	// documents what (if anything) node synthesis was fed, not a live
+	// backend.
 	OllamaURL                        string  `json:"ollama_url"`
 	Port                             string  `json:"port"`
 	LogLevel                         string  `json:"log_level"`
@@ -32,6 +36,7 @@ type ConfigSnapshot struct {
 	Version                          string  `json:"version"`
 	BuildTime                        string  `json:"build_time"`
 	GoVersion                        string  `json:"go_version"`
+	ModelsListAll                    bool    `json:"models_list_all"`
 }
 
 func (h *handler) getConfig(w http.ResponseWriter, r *http.Request) {

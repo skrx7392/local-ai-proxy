@@ -18,7 +18,7 @@ type Metrics struct {
 	ResponseBodySize *prometheus.HistogramVec // labels: method, status
 
 	// Token metrics (recorded by proxy handler)
-	TokensTotal *prometheus.CounterVec // labels: model, type (prompt|completion)
+	TokensTotal *prometheus.CounterVec // labels: model, type (prompt|completion), node
 
 	// Credit/rate limit
 	CreditGateRejects prometheus.Counter
@@ -78,8 +78,8 @@ func New(usageChLen func() int) *Metrics {
 
 		TokensTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "aiproxy_tokens_total",
-			Help: "Total tokens processed.",
-		}, []string{"model", "type"}),
+			Help: "Total tokens processed, by model, type, and serving node.",
+		}, []string{"model", "type", "node"}),
 
 		CreditGateRejects: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "aiproxy_credit_gate_rejects_total",
@@ -172,16 +172,18 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }
 
-// RecordTokens increments token counters. Nil-safe.
-func (m *Metrics) RecordTokens(model string, prompt, completion int) {
+// RecordTokens increments token counters for the node that served the
+// request (cardinality is bounded by the handful of configured nodes).
+// Nil-safe.
+func (m *Metrics) RecordTokens(model, node string, prompt, completion int) {
 	if m == nil {
 		return
 	}
 	if prompt > 0 {
-		m.TokensTotal.WithLabelValues(model, "prompt").Add(float64(prompt))
+		m.TokensTotal.WithLabelValues(model, "prompt", node).Add(float64(prompt))
 	}
 	if completion > 0 {
-		m.TokensTotal.WithLabelValues(model, "completion").Add(float64(completion))
+		m.TokensTotal.WithLabelValues(model, "completion", node).Add(float64(completion))
 	}
 }
 

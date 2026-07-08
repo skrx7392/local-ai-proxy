@@ -7,9 +7,11 @@ import (
 )
 
 type Config struct {
-	// OllamaURL keeps its legacy localhost default solely for the pre-BE-6
-	// proxy/health code paths; node synthesis must NEVER read it without
-	// checking OllamaURLSet first.
+	// OllamaURL is the raw OLLAMA_URL value, empty when unset (no default:
+	// BE-6 removed the legacy localhost fallback together with its last
+	// consumers). It feeds node synthesis (internal/nodesource) and the
+	// admin config snapshot only; nothing treats it as a routable backend
+	// directly anymore.
 	OllamaURL string
 	// OllamaURLSet records whether OLLAMA_URL was explicitly present (and
 	// non-empty) in the environment. Node synthesis keys off explicit
@@ -18,6 +20,10 @@ type Config struct {
 	// docs/design/distributed-nodes.md "Backward compatibility with
 	// OLLAMA_URL".
 	OllamaURLSet bool
+	// ModelsListAll (MODELS_LIST_ALL, default false) makes GET /v1/models
+	// list every actively priced model regardless of node availability
+	// instead of the priced-AND-served intersection.
+	ModelsListAll bool
 	// NodesFile is the optional path to a JSON node-declaration file
 	// (NODES_FILE). Empty means no file is loaded.
 	NodesFile           string
@@ -107,20 +113,28 @@ func Load() (Config, error) {
 	// Track explicit presence of OLLAMA_URL (empty counts as unset, matching
 	// the rest of the config): node synthesis must distinguish "operator
 	// pointed us at an Ollama" from "nothing configured", so it keys off
-	// OllamaURLSet — never the value. The value keeps the legacy localhost
-	// default ONLY for the not-yet-rewired consumers (health checker, proxy
-	// constructor, admin config snapshot); BE-6 removes the default together
-	// with those code paths, at which point an unset OLLAMA_URL means a
-	// zero-node install.
+	// OllamaURLSet — never the value. There is no default: an unset
+	// OLLAMA_URL means a zero-node install (chat 503s until a node is
+	// registered; the admin API stays available).
 	ollamaURL, ollamaSet := os.LookupEnv("OLLAMA_URL")
 	ollamaExplicit := ollamaSet && ollamaURL != ""
 	if !ollamaExplicit {
-		ollamaURL = "http://localhost:11434"
+		ollamaURL = ""
+	}
+
+	modelsListAll := false
+	if v := os.Getenv("MODELS_LIST_ALL"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid MODELS_LIST_ALL: %w", err)
+		}
+		modelsListAll = b
 	}
 
 	return Config{
 		OllamaURL:           ollamaURL,
 		OllamaURLSet:        ollamaExplicit,
+		ModelsListAll:       modelsListAll,
 		NodesFile:           os.Getenv("NODES_FILE"),
 		AdminKey:            adminKey,
 		AdminBootstrapToken: os.Getenv("ADMIN_BOOTSTRAP_TOKEN"),

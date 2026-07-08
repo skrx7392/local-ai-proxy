@@ -146,7 +146,7 @@ All configuration via environment variables:
 |----------|---------|-------------|
 | `ADMIN_KEY` | *(required)* | Admin API authentication key |
 | `DATABASE_URL` | *(required)* | PostgreSQL connection string |
-| `OLLAMA_URL` | *(deprecated default: `http://localhost:11434`)* | Ollama backend URL — the implicit default is going away with node routing and no node is declared from it; local dev must set it explicitly |
+| `OLLAMA_URL` | *(none)* | Optional single-node shortcut: when set, a config-sourced node named `default` is synthesized from it at startup; unset means no synthesized node (a fresh install starts with zero nodes and chat requests 503 until a node is registered) |
 | `PORT` | `8080` | Server listen port |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes (chat proxy path) |
