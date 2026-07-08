@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 )
 
@@ -47,8 +48,13 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Port != "8080" {
 		t.Errorf("expected default port '8080', got %q", cfg.Port)
 	}
-	if cfg.OllamaURL != "http://localhost:11434" {
-		t.Errorf("expected default OllamaURL, got %q", cfg.OllamaURL)
+	// OLLAMA_URL no longer defaults to localhost: unset (or explicitly
+	// empty) means no implicit node is ever synthesized.
+	if cfg.OllamaURL != "" {
+		t.Errorf("expected empty OllamaURL when unset, got %q", cfg.OllamaURL)
+	}
+	if cfg.OllamaURLSet {
+		t.Error("expected OllamaURLSet=false when OLLAMA_URL is unset")
 	}
 	if cfg.CORSOrigins != "*" {
 		t.Errorf("expected default CORSOrigins '*', got %q", cfg.CORSOrigins)
@@ -128,6 +134,9 @@ func TestLoad_CustomValues(t *testing.T) {
 	if cfg.OllamaURL != "http://ollama:11434" {
 		t.Errorf("expected custom OllamaURL, got %q", cfg.OllamaURL)
 	}
+	if !cfg.OllamaURLSet {
+		t.Error("expected OllamaURLSet=true when OLLAMA_URL is explicitly set")
+	}
 	if cfg.CORSOrigins != "https://example.com" {
 		t.Errorf("expected custom CORSOrigins, got %q", cfg.CORSOrigins)
 	}
@@ -181,6 +190,80 @@ func TestLoad_MaxJSONBodyRejectsInvalid(t *testing.T) {
 				t.Fatalf("expected error for MAX_JSON_REQUEST_BODY=%s", bad)
 			}
 		})
+	}
+}
+
+func TestLoad_OllamaURL_UnsetMeansNoSynthesis(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	// t.Setenv registers restoration; Unsetenv makes the variable truly
+	// absent (LookupEnv ok=false), not merely empty.
+	t.Setenv("OLLAMA_URL", "placeholder")
+	os.Unsetenv("OLLAMA_URL")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OllamaURLSet {
+		t.Error("expected OllamaURLSet=false when OLLAMA_URL is absent")
+	}
+	if cfg.OllamaURL != "" {
+		t.Errorf("expected empty OllamaURL, got %q", cfg.OllamaURL)
+	}
+}
+
+func TestLoad_OllamaURL_ExplicitlyEmptyTreatedAsUnset(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("OLLAMA_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OllamaURLSet {
+		t.Error("expected OllamaURLSet=false for explicitly empty OLLAMA_URL")
+	}
+}
+
+func TestLoad_OllamaURL_ExplicitPresence(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("OLLAMA_URL", "http://localhost:11434")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.OllamaURLSet {
+		t.Error("expected OllamaURLSet=true when OLLAMA_URL is set")
+	}
+	if cfg.OllamaURL != "http://localhost:11434" {
+		t.Errorf("OllamaURL = %q, want http://localhost:11434", cfg.OllamaURL)
+	}
+}
+
+func TestLoad_NodesFile(t *testing.T) {
+	t.Setenv("ADMIN_KEY", "key")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("NODES_FILE", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.NodesFile != "" {
+		t.Errorf("expected empty NodesFile default, got %q", cfg.NodesFile)
+	}
+
+	t.Setenv("NODES_FILE", "/etc/laip/nodes.json")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.NodesFile != "/etc/laip/nodes.json" {
+		t.Errorf("NodesFile = %q, want /etc/laip/nodes.json", cfg.NodesFile)
 	}
 }
 

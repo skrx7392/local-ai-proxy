@@ -7,7 +7,17 @@ import (
 )
 
 type Config struct {
-	OllamaURL           string
+	OllamaURL string
+	// OllamaURLSet records whether OLLAMA_URL was explicitly present (and
+	// non-empty) in the environment. Node synthesis keys off explicit
+	// presence, not the value: when unset there is NO implicit localhost
+	// node — a fresh install starts with zero nodes. See
+	// docs/design/distributed-nodes.md "Backward compatibility with
+	// OLLAMA_URL".
+	OllamaURLSet bool
+	// NodesFile is the optional path to a JSON node-declaration file
+	// (NODES_FILE). Empty means no file is loaded.
+	NodesFile           string
 	AdminKey            string
 	AdminBootstrapToken string
 	DatabaseURL         string
@@ -91,8 +101,16 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// Track explicit presence of OLLAMA_URL (empty counts as unset, matching
+	// the rest of the config): node synthesis must distinguish "operator
+	// pointed us at an Ollama" from "nothing configured". The old implicit
+	// http://localhost:11434 default is deliberately gone.
+	ollamaURL, ollamaSet := os.LookupEnv("OLLAMA_URL")
+
 	return Config{
-		OllamaURL:           envOrDefault("OLLAMA_URL", "http://localhost:11434"),
+		OllamaURL:           ollamaURL,
+		OllamaURLSet:        ollamaSet && ollamaURL != "",
+		NodesFile:           os.Getenv("NODES_FILE"),
 		AdminKey:            adminKey,
 		AdminBootstrapToken: os.Getenv("ADMIN_BOOTSTRAP_TOKEN"),
 		DatabaseURL:         databaseURL,
