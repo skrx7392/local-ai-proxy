@@ -1,0 +1,111 @@
+# Self-hosting example: gateway + Postgres + two Ollama nodes.
+#
+# Host ports are deliberately non-standard (18080) or unbound so the stack
+# never collides with a Postgres/Ollama already running on the host. See
+# README.md in this directory for the full bootstrap walkthrough.
+
+name: local-ai-proxy-example
+
+services:
+  gateway:
+    build:
+      # Build from the repo's Dockerfile — no registry image required.
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "18080:8080"
+    environment:
+      ADMIN_KEY: ${ADMIN_KEY:-change-me-admin-key}
+      DATABASE_URL: postgres://proxy:proxy@postgres:5432/proxy?sslmode=disable
+      # Nodes are declared in nodes.json (mounted below). Deliberately no
+      # OLLAMA_URL: unset means no synthesized "default" node.
+      NODES_FILE: /etc/local-ai-proxy/nodes.json
+      LOG_LEVEL: info
+      # Secrets referenced as ${VAR} inside nodes.json are expanded from this
+      # environment. Uncomment when enabling the cloud node (see README.md):
+      # CLOUD_KEY: ${CLOUD_KEY}
+    volumes:
+      - ./nodes.json:/etc/local-ai-proxy/nodes.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama-a:
+        condition: service_healthy
+      ollama-b:
+        condition: service_healthy
+    healthcheck:
+      # Readiness = DB ok + usage writer ok + at least one healthy node
+      # (or zero nodes configured).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/api/healthz/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    # No host port binding: only the gateway needs to reach it. If you want
+    # host access for debugging, bind a high port, e.g. "15432:5432".
+    environment:
+      POSTGRES_USER: proxy
+      POSTGRES_PASSWORD: proxy
+      POSTGRES_DB: proxy
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proxy -d proxy"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Node 1: plain auto-discovery. The gateway probes GET /api/tags every ~15s;
+  # whatever models you `ollama pull` here become routable automatically.
+  ollama-a:
+    image: ollama/ollama:latest
+    environment:
+      # Single-model node: keep the model resident in memory permanently
+      # instead of unloading after the default 5 minutes.
+      OLLAMA_KEEP_ALIVE: "-1"
+    volumes:
+      - ollama_a_models:/root/.ollama
+    # Host access is not required (the gateway reaches it on the compose
+    # network). For host-side debugging, bind a high port:
+    # ports:
+    #   - "21434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # Node 2: demonstrates static_models (see nodes.json). Discovery is
+  # disabled for this node; the gateway only health-checks it and trusts the
+  # declared model list. Pull the declared model here before routing to it:
+  #   docker compose exec ollama-b ollama pull llama3.2:1b
+  ollama-b:
+    image: ollama/ollama:latest
+    environment:
+      # Multi-model / low-memory node tuning: cap concurrent requests per
+      # model instead of pinning everything in memory.
+      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_NUM_PARALLEL: "1"
+    volumes:
+      - ollama_b_models:/root/.ollama
+    # ports:
+    #   - "21435:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ollama_a_models:
+  ollama_b_models:

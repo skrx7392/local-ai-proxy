@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    {
+      "name": "ollama-a",
+      "base_url": "http://ollama-a:11434",
+      "backend_type": "ollama"
+    },
+    {
+      "name": "ollama-b",
+      "base_url": "http://ollama-b:11434",
+      "backend_type": "ollama",
+      "static_models": ["llama3.2:1b"]
+    }
+  ]
+}
