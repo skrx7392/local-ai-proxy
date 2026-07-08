@@ -132,6 +132,10 @@ type keyResponse struct {
 	RateLimit int       `json:"rate_limit"`
 	CreatedAt time.Time `json:"created_at"`
 	Revoked   bool      `json:"revoked"`
+	// LastUsedAt is the most recent request time derived from usage_logs,
+	// RFC3339-formatted. nil (JSON null) means the key has never served a
+	// request — the FE renders that as "Never".
+	LastUsedAt *string `json:"last_used_at"`
 }
 
 func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.UsageEntry, opts Options) http.Handler {
@@ -415,12 +419,13 @@ func (h *handler) listKeys(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		resp = append(resp, keyResponse{
-			ID:        apiKey.ID,
-			Name:      apiKey.Name,
-			KeyPrefix: apiKey.KeyPrefix,
-			RateLimit: apiKey.RateLimit,
-			CreatedAt: apiKey.CreatedAt,
-			Revoked:   apiKey.Revoked,
+			ID:         apiKey.ID,
+			Name:       apiKey.Name,
+			KeyPrefix:  apiKey.KeyPrefix,
+			RateLimit:  apiKey.RateLimit,
+			CreatedAt:  apiKey.CreatedAt,
+			Revoked:    apiKey.Revoked,
+			LastUsedAt: formatRFC3339Ptr(apiKey.LastUsedAt),
 		})
 	}
 
@@ -1156,15 +1161,16 @@ func (h *handler) updateUserRole(w http.ResponseWriter, r *http.Request) {
 }
 
 type keyDetailDTO struct {
-	ID                int64  `json:"id"`
-	Name              string `json:"name"`
-	KeyPrefix         string `json:"key_prefix"`
-	RateLimit         int    `json:"rate_limit"`
-	Revoked           bool   `json:"revoked"`
-	UserID            *int64 `json:"user_id"`
-	AccountID         *int64 `json:"account_id"`
-	SessionTokenLimit *int   `json:"session_token_limit"`
-	CreatedAt         string `json:"created_at"`
+	ID                int64   `json:"id"`
+	Name              string  `json:"name"`
+	KeyPrefix         string  `json:"key_prefix"`
+	RateLimit         int     `json:"rate_limit"`
+	Revoked           bool    `json:"revoked"`
+	UserID            *int64  `json:"user_id"`
+	AccountID         *int64  `json:"account_id"`
+	SessionTokenLimit *int    `json:"session_token_limit"`
+	CreatedAt         string  `json:"created_at"`
+	LastUsedAt        *string `json:"last_used_at"`
 }
 
 func toKeyDetailDTO(k *store.APIKey) keyDetailDTO {
@@ -1178,7 +1184,18 @@ func toKeyDetailDTO(k *store.APIKey) keyDetailDTO {
 		AccountID:         k.AccountID,
 		SessionTokenLimit: k.SessionTokenLimit,
 		CreatedAt:         k.CreatedAt.Format(time.RFC3339),
+		LastUsedAt:        formatRFC3339Ptr(k.LastUsedAt),
 	}
+}
+
+// formatRFC3339Ptr renders a nullable timestamp as an RFC3339 string pointer,
+// preserving nil so the JSON field serializes to null (never a zero time).
+func formatRFC3339Ptr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.Format(time.RFC3339)
+	return &s
 }
 
 func (h *handler) getKey(w http.ResponseWriter, r *http.Request) {
