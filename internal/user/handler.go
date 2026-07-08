@@ -559,7 +559,7 @@ func (h *handler) getUsage(w http.ResponseWriter, r *http.Request) {
 	var allStats []store.UsageStat
 	for _, k := range keys {
 		keyID := k.ID
-		stats, err := h.store.GetUsageStats(&keyID, nil)
+		stats, err := h.store.GetUsageStats(&keyID, nil, nil)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "usage stats error", "error", err)
 			proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get usage stats")

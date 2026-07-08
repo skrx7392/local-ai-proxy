@@ -37,6 +37,9 @@ type ConfigSnapshot struct {
 	BuildTime                        string  `json:"build_time"`
 	GoVersion                        string  `json:"go_version"`
 	ModelsListAll                    bool    `json:"models_list_all"`
+	// NodesFile reports the NODES_FILE path; empty when unset. Also used by
+	// the nodes API's config-sourced 409 message to point at the file.
+	NodesFile string `json:"nodes_file"`
 }
 
 func (h *handler) getConfig(w http.ResponseWriter, r *http.Request) {
@@ -68,12 +71,48 @@ func (h *handler) getHealth(w http.ResponseWriter, r *http.Request) {
 		uptime = int64(time.Since(h.startTime).Seconds())
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(httpStatus)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"status":         status,
 		"checks":         checks,
 		"uptime_seconds": uptime,
 		"version":        h.configSnapshot.Version,
-	})
+	}
+
+	// BE 7: per-node breakdown from the registry snapshot, additive to the
+	// existing shape. Zero enabled nodes is not degraded (a fresh install
+	// must serve the admin API to register its first node) but is flagged.
+	if h.nodeRegistry != nil {
+		snap := h.nodeRegistry.Snapshot()
+		nodes := make([]nodeHealthDTO, 0, len(snap.Nodes))
+		for _, ns := range snap.Nodes {
+			n := nodeHealthDTO{
+				Name:       ns.Node.Name,
+				Health:     string(ns.Health),
+				LastError:  ns.LastError,
+				ModelCount: len(ns.Models),
+			}
+			if !ns.LastCheckedAt.IsZero() {
+				s := ns.LastCheckedAt.Format(time.RFC3339)
+				n.LastCheckedAt = &s
+			}
+			nodes = append(nodes, n)
+		}
+		resp["nodes"] = nodes
+		if len(nodes) == 0 {
+			resp["warning"] = "no nodes configured"
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpStatus)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// nodeHealthDTO is one node's row in the /api/admin/health breakdown.
+type nodeHealthDTO struct {
+	Name          string  `json:"name"`
+	Health        string  `json:"health"`
+	LastError     string  `json:"last_error,omitempty"`
+	LastCheckedAt *string `json:"last_checked_at"`
+	ModelCount    int     `json:"model_count"`
 }

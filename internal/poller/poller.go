@@ -251,6 +251,45 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 }
 
+// RefreshNode synchronously refreshes one node for the admin API (BE-7): it
+// reloads the full node set from the database (so a node just created,
+// updated, or disabled is reconciled into the registry immediately — the
+// poller's periodic re-read is only the fallback), then probes the node with
+// the given ID once using the normal probe machinery and per-probe timeout,
+// publishing the outcome to the registry before returning.
+//
+// The forced probe uses startup-sweep semantics: a single failure is decisive
+// (unhealthy), with no hysteresis — the caller asked for a fresh verdict and
+// gets one. Any success is immediately healthy and routable.
+//
+// If the node is disabled or absent from the database, the reload alone is
+// the refresh: it drops the node from the registry and poller state, which is
+// how admin DELETE removes a node from routing synchronously. No error is
+// returned for that case. The returned error is only ever a failed database
+// load; probe failures are recorded in the registry, not returned (matching
+// SweepOnce).
+//
+// RefreshNode is safe to call concurrently with Run and with itself: reload
+// reconciliation and probe application both run under the poller's internal
+// lock, and the registry publishes atomically.
+func (p *Poller) RefreshNode(ctx context.Context, nodeID int64) error {
+	specs, err := p.load()
+	if err != nil {
+		return err
+	}
+	for _, s := range specs {
+		if s.id != nodeID {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, p.opts.ProbeTimeout)
+		models, probeErr := p.probe(probeCtx, s)
+		cancel()
+		p.apply(s, models, probeErr, true)
+		return nil
+	}
+	return nil
+}
+
 // pollCycle runs one poll cycle — reload, probe everything due, compute the
 // next wake — and returns how long to wait before the next cycle. When the
 // reload fails it falls back to the last successfully loaded node set: a

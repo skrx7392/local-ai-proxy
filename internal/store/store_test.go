@@ -260,7 +260,7 @@ func TestGetUsageStats_NoFilters(t *testing.T) {
 		DurationMs: 200, Status: "completed",
 	})
 
-	stats, err := s.GetUsageStats(nil, nil)
+	stats, err := s.GetUsageStats(nil, nil, nil)
 	if err != nil {
 		t.Fatalf("GetUsageStats: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestGetUsageStats_WithKeyFilter(t *testing.T) {
 	_ = s.LogUsage(UsageEntry{APIKeyID: id1, Model: "llama3", PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, DurationMs: 100, Status: "completed"})
 	_ = s.LogUsage(UsageEntry{APIKeyID: id2, Model: "llama3", PromptTokens: 20, CompletionTokens: 10, TotalTokens: 30, DurationMs: 200, Status: "completed"})
 
-	stats, err := s.GetUsageStats(&id1, nil)
+	stats, err := s.GetUsageStats(&id1, nil, nil)
 	if err != nil {
 		t.Fatalf("GetUsageStats: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestGetUsageStats_WithSinceFilter(t *testing.T) {
 
 	// Query with a time in the past — should include the entry
 	past := time.Now().Add(-1 * time.Hour)
-	stats, err := s.GetUsageStats(nil, &past)
+	stats, err := s.GetUsageStats(nil, &past, nil)
 	if err != nil {
 		t.Fatalf("GetUsageStats with since: %v", err)
 	}
@@ -315,12 +315,50 @@ func TestGetUsageStats_WithSinceFilter(t *testing.T) {
 
 	// Query with a time in the future — should exclude everything
 	future := time.Now().Add(1 * time.Hour)
-	stats, err = s.GetUsageStats(nil, &future)
+	stats, err = s.GetUsageStats(nil, &future, nil)
 	if err != nil {
 		t.Fatalf("GetUsageStats with future since: %v", err)
 	}
 	if len(stats) != 0 {
 		t.Errorf("expected 0 stats with future since filter, got %d", len(stats))
+	}
+}
+
+func TestGetUsageStats_WithNodeFilter(t *testing.T) {
+	s := setupTestStore(t)
+
+	keyID, _ := s.CreateKey("node-filter-key", "hash-nodef", "sk-nodef", 60)
+	nodeA, err := s.CreateNode(Node{Name: "usage-a", BaseURL: "http://usage-a:11434"})
+	if err != nil {
+		t.Fatalf("CreateNode a: %v", err)
+	}
+	nodeB, err := s.CreateNode(Node{Name: "usage-b", BaseURL: "http://usage-b:11434"})
+	if err != nil {
+		t.Fatalf("CreateNode b: %v", err)
+	}
+
+	_ = s.LogUsage(UsageEntry{APIKeyID: keyID, Model: "on-a", PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2, DurationMs: 10, Status: "completed", NodeID: &nodeA})
+	_ = s.LogUsage(UsageEntry{APIKeyID: keyID, Model: "on-b", PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2, DurationMs: 10, Status: "completed", NodeID: &nodeB})
+	_ = s.LogUsage(UsageEntry{APIKeyID: keyID, Model: "no-node", PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2, DurationMs: 10, Status: "completed"})
+
+	stats, err := s.GetUsageStats(nil, nil, &nodeA)
+	if err != nil {
+		t.Fatalf("GetUsageStats with node filter: %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 stat row for node filter, got %d: %+v", len(stats), stats)
+	}
+	if stats[0].Model != "on-a" {
+		t.Errorf("expected model on-a, got %q", stats[0].Model)
+	}
+
+	// nil node filter keeps returning everything, including NULL-node rows.
+	stats, err = s.GetUsageStats(nil, nil, nil)
+	if err != nil {
+		t.Fatalf("GetUsageStats without node filter: %v", err)
+	}
+	if len(stats) != 3 {
+		t.Errorf("expected 3 stat rows without node filter, got %d", len(stats))
 	}
 }
 

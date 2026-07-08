@@ -1041,8 +1041,11 @@ func (s *Store) BackfillAccounts() error {
 	return nil
 }
 
-// GetUsageStats returns aggregated usage statistics.
-func (s *Store) GetUsageStats(keyID *int64, since *time.Time) ([]UsageStat, error) {
+// GetUsageStats returns aggregated usage statistics. All filters are
+// optional: keyID restricts to one API key, since to entries at or after a
+// time, and nodeID to entries served by one backend node (entries logged
+// before node routing have a NULL node_id and only appear unfiltered).
+func (s *Store) GetUsageStats(keyID *int64, since *time.Time, nodeID *int64) ([]UsageStat, error) {
 	query := `SELECT u.api_key_id, k.name, u.model, COUNT(*) as total_requests,
 		SUM(u.prompt_tokens), SUM(u.completion_tokens), SUM(u.total_tokens), u.status
 		FROM usage_logs u JOIN api_keys k ON u.api_key_id = k.id
@@ -1058,6 +1061,11 @@ func (s *Store) GetUsageStats(keyID *int64, since *time.Time) ([]UsageStat, erro
 	if since != nil {
 		query += fmt.Sprintf(` AND u.created_at >= $%d`, argIdx)
 		args = append(args, *since)
+		argIdx++
+	}
+	if nodeID != nil {
+		query += fmt.Sprintf(` AND u.node_id = $%d`, argIdx)
+		args = append(args, *nodeID)
 		argIdx++
 	}
 
