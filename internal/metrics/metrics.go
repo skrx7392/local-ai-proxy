@@ -27,6 +27,7 @@ type Metrics struct {
 
 	// Infrastructure
 	OllamaUp prometheus.Gauge
+	NodeUp   *prometheus.GaugeVec // labels: node — per-node probe health (1=up, 0=down)
 
 	// Sweeper
 	SweeperRuns  *prometheus.CounterVec // labels: operation (stale_holds|settled_cleanup), outcome (success|error)
@@ -100,6 +101,11 @@ func New(usageChLen func() int) *Metrics {
 			Help: "Whether Ollama is reachable (1=up, 0=down). Updated on readiness check.",
 		}),
 
+		NodeUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "aiproxy_node_up",
+			Help: "Whether a backend node is healthy per its last probe (1=up, 0=down), by node name.",
+		}, []string{"node"}),
+
 		SweeperRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "aiproxy_credit_sweeper_runs_total",
 			Help: "Credit-hold sweeper tick invocations by operation and outcome.",
@@ -140,6 +146,7 @@ func New(usageChLen func() int) *Metrics {
 		m.RateLimitRejects,
 		m.UsageDrops,
 		m.OllamaUp,
+		m.NodeUp,
 		m.SweeperRuns,
 		m.SweeperSwept,
 		m.Registrations,
@@ -200,6 +207,45 @@ func (m *Metrics) RecordUsageDrop() {
 		return
 	}
 	m.UsageDrops.Inc()
+}
+
+// SetNodeUp sets aiproxy_node_up{node} to 1 (up) or 0 (down). Called by the
+// node health poller on every probe. Nil-safe.
+func (m *Metrics) SetNodeUp(node string, up bool) {
+	if m == nil {
+		return
+	}
+	v := 0.0
+	if up {
+		v = 1.0
+	}
+	m.NodeUp.WithLabelValues(node).Set(v)
+}
+
+// DeleteNodeUp removes the aiproxy_node_up series for a node that no longer
+// exists (removed or renamed), so stale series don't linger on /metrics.
+// Deleting a series that was never set is a no-op. Nil-safe.
+func (m *Metrics) DeleteNodeUp(node string) {
+	if m == nil {
+		return
+	}
+	m.NodeUp.DeleteLabelValues(node)
+}
+
+// SetOllamaUp sets the legacy aiproxy_ollama_up gauge. Kept for one release
+// as the OR of all node states: the node health poller calls this with
+// "any node healthy" after every probe cycle (see internal/poller). While a
+// poller is running it owns this gauge — BE-6 must not also wire
+// health.Checker.SetOllamaGauge, or the two writers will fight. Nil-safe.
+func (m *Metrics) SetOllamaUp(up bool) {
+	if m == nil {
+		return
+	}
+	if up {
+		m.OllamaUp.Set(1)
+		return
+	}
+	m.OllamaUp.Set(0)
 }
 
 // RecordSweeperRun records a sweeper tick. On success, rowsAffected is added
