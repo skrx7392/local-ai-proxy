@@ -2,7 +2,10 @@ package poller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,6 +118,121 @@ func TestLoad_ReloadPicksUpChangesAndResetsOnBaseURLChange(t *testing.T) {
 	if ns := nodeState(t, reg, 1); ns.Models != nil {
 		t.Errorf("node 1 Models = %v, want nil after BaseURL change", ns.Models)
 	}
+}
+
+// A transient reload failure must not stop health probing: the cycle falls
+// back to the last successfully loaded node set, otherwise routing would
+// trust stale registry state until the DB recovers.
+func TestPollCycle_ReloadFailureKeepsProbingLastNodes(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write([]byte(`{"models":[{"name":"m"}]}`))
+	}))
+	defer srv.Close()
+
+	p, reg, src := newTestPoller(t, []store.Node{enabledNode(1, "n1", srv.URL, "ollama")}, Options{})
+
+	// Load succeeds once (no probe yet), then the source starts failing.
+	if _, err := p.load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	src.set(nil, context.DeadlineExceeded)
+
+	p.pollCycle(context.Background())
+
+	if got := hits.Load(); got != 1 {
+		t.Errorf("backend probed %d times, want 1 (cycle must fall back to cached node set)", got)
+	}
+	if ns := nodeState(t, reg, 1); ns.Health != registry.HealthHealthy {
+		t.Errorf("Health = %q, want healthy despite reload failure", ns.Health)
+	}
+}
+
+// A node whose probe configuration changed without a BaseURL change (new
+// static_models list, backend_type flip, static_models removed) is a
+// different probing target: its carried-over health/models must reset so a
+// removed model can never stay routable on stale state.
+func TestLoad_ResetsStateWhenProbeConfigChanges(t *testing.T) {
+	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"models":[{"name":"discovered"}]}`))
+	}))
+	defer discovery.Close()
+
+	staticNode := func(models []string) store.Node {
+		n := enabledNode(1, "n1", discovery.URL, "ollama")
+		n.StaticModels = models
+		return n
+	}
+
+	t.Run("static_models replaced", func(t *testing.T) {
+		p, reg, src := newTestPoller(t, []store.Node{staticNode([]string{"old-model"})}, Options{})
+		pollOnce(t, p)
+		if _, err := reg.Resolve("old-model"); err != nil {
+			t.Fatalf("setup: old-model not routable: %v", err)
+		}
+
+		src.set([]store.Node{staticNode([]string{"new-model"})}, nil)
+		if _, err := p.load(); err != nil {
+			t.Fatalf("load: %v", err)
+		}
+
+		// Immediately after the reload — before any probe — the stale
+		// static model must no longer be routable.
+		if _, err := reg.Resolve("old-model"); err == nil {
+			t.Error("old-model still routable after static_models changed")
+		}
+		if ns := nodeState(t, reg, 1); ns.Health != registry.HealthUnknown {
+			t.Errorf("Health = %q, want unknown after config change", ns.Health)
+		}
+
+		// The node is due immediately and the next probe publishes the new list.
+		pollOnce(t, p)
+		if _, err := reg.Resolve("new-model"); err != nil {
+			t.Errorf("new-model not routable after reprobe: %v", err)
+		}
+	})
+
+	t.Run("backend_type changed", func(t *testing.T) {
+		p, reg, src := newTestPoller(t, []store.Node{enabledNode(1, "n1", discovery.URL, "ollama")}, Options{})
+		pollOnce(t, p)
+
+		changed := enabledNode(1, "n1", discovery.URL, "openai_compat")
+		src.set([]store.Node{changed}, nil)
+		if _, err := p.load(); err != nil {
+			t.Fatalf("load: %v", err)
+		}
+
+		ns := nodeState(t, reg, 1)
+		if ns.Health != registry.HealthUnknown {
+			t.Errorf("Health = %q, want unknown after backend_type change", ns.Health)
+		}
+		if ns.Models != nil {
+			t.Errorf("Models = %v, want nil after backend_type change", ns.Models)
+		}
+	})
+
+	t.Run("static_models removed", func(t *testing.T) {
+		p, reg, src := newTestPoller(t, []store.Node{staticNode([]string{"pinned"})}, Options{})
+		pollOnce(t, p)
+		if _, err := reg.Resolve("pinned"); err != nil {
+			t.Fatalf("setup: pinned not routable: %v", err)
+		}
+
+		src.set([]store.Node{enabledNode(1, "n1", discovery.URL, "ollama")}, nil)
+		if _, err := p.load(); err != nil {
+			t.Fatalf("load: %v", err)
+		}
+
+		if _, err := reg.Resolve("pinned"); err == nil {
+			t.Error("pinned still routable after static_models removed")
+		}
+
+		pollOnce(t, p)
+		if _, err := reg.Resolve("discovered"); err != nil {
+			t.Errorf("discovered model not routable after switch to discovery: %v", err)
+		}
+	})
 }
 
 func TestLoad_SourceErrorLeavesRegistryUntouched(t *testing.T) {

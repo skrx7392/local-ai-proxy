@@ -54,6 +54,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -130,12 +131,26 @@ func (s nodeSpec) probeURL() string {
 	}
 }
 
+// identity returns the node's probe identity: every field that changes what
+// a probe means — the URL it hits, the credentials it carries, and whether
+// the model list is discovered or statically pinned (and to what). Runtime
+// state carried across a reload is only valid while the identity is
+// unchanged; the nil-vs-empty staticModels distinction is encoded so
+// switching between discovery and an empty static list also resets.
+func (s nodeSpec) identity() string {
+	id := s.baseURL.String() + "\x1f" + s.backendType + "\x1f" + s.authHeader + "\x1f" + s.healthPath + "\x1f"
+	if s.staticModels == nil {
+		return id + "discovery"
+	}
+	return id + "static\x1f" + strings.Join(s.staticModels, "\x1f")
+}
+
 // nodeRuntime is the poller-owned per-node state machine, guarded by
 // Poller.mu. The poller (not the registry) owns hysteresis: the registry only
 // ever sees the already-smoothed health value.
 type nodeRuntime struct {
 	name      string          // last published metric label, for series cleanup
-	baseURL   string          // to detect re-pointed nodes on reload
+	identity  string          // probe identity; a change invalidates runtime state
 	health    registry.Health // smoothed health as last published
 	failures  int             // consecutive probe failures
 	models    []string        // last known model list; nil = never discovered
@@ -153,8 +168,9 @@ type Poller struct {
 	client *http.Client
 	now    func() time.Time // injectable clock for tests
 
-	mu    sync.Mutex
-	state map[int64]*nodeRuntime
+	mu        sync.Mutex
+	state     map[int64]*nodeRuntime
+	lastSpecs []nodeSpec // last successfully loaded node set (reload fallback)
 }
 
 // New builds a poller. reg must be non-nil; m may be nil (metrics disabled).
@@ -227,36 +243,56 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-timer.C:
 		}
 
-		specs, err := p.load()
-		if err != nil {
-			// Keep probing the last-loaded node set on DB hiccups: routing
-			// should not degrade just because a reload failed.
-			slog.Error("node poller: reloading nodes failed", "error", err)
-		}
-		now := p.now()
-		due := make([]nodeSpec, 0, len(specs))
-		for _, s := range specs {
-			if !p.nextDue(s.id).After(now) {
-				due = append(due, s)
-			}
-		}
-		p.probeSpecs(ctx, due, false)
+		wait := p.pollCycle(ctx)
 		if ctx.Err() != nil {
 			return
 		}
-
-		next := p.now().Add(p.opts.Interval)
-		for _, s := range specs {
-			if d := p.nextDue(s.id); d.Before(next) {
-				next = d
-			}
-		}
-		wait := next.Sub(p.now())
-		if wait < minWait {
-			wait = minWait
-		}
 		timer.Reset(wait)
 	}
+}
+
+// pollCycle runs one poll cycle — reload, probe everything due, compute the
+// next wake — and returns how long to wait before the next cycle. When the
+// reload fails it falls back to the last successfully loaded node set: a
+// transient DB error must not stop health refreshing, or routing would trust
+// stale registry state until the DB recovers.
+func (p *Poller) pollCycle(ctx context.Context) time.Duration {
+	specs, err := p.load()
+	if err != nil {
+		specs = p.cachedSpecs()
+		slog.Error("node poller: reloading nodes failed; probing last-known node set",
+			"error", err, "nodes", len(specs))
+	}
+	now := p.now()
+	due := make([]nodeSpec, 0, len(specs))
+	for _, s := range specs {
+		if !p.nextDue(s.id).After(now) {
+			due = append(due, s)
+		}
+	}
+	p.probeSpecs(ctx, due, false)
+
+	// Next wake: the earliest node due, capped at one base interval so node
+	// additions/changes in the DB are picked up within ~Interval even when
+	// nothing is due sooner.
+	next := p.now().Add(p.opts.Interval)
+	for _, s := range specs {
+		if d := p.nextDue(s.id); d.Before(next) {
+			next = d
+		}
+	}
+	wait := next.Sub(p.now())
+	if wait < minWait {
+		wait = minWait
+	}
+	return wait
+}
+
+// cachedSpecs returns the node set from the last successful load.
+func (p *Poller) cachedSpecs() []nodeSpec {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastSpecs
 }
 
 // load reads all nodes from the source, maps the enabled ones into the
@@ -317,8 +353,12 @@ func (p *Poller) load() ([]nodeSpec, error) {
 // reconcile aligns the poller's runtime state with a freshly loaded node
 // set: new nodes start unknown and immediately due, removed nodes drop their
 // state and metric series, renamed nodes migrate their metric series, and a
-// node whose BaseURL changed is a different backend — its hysteresis state,
-// model list, and schedule reset (mirroring registry.SetNodes semantics).
+// node whose probe identity changed (BaseURL, backend_type, auth_header,
+// health_path, or static_models) is a different probing target — its
+// hysteresis state, model list, and schedule reset, and the reset is
+// published to the registry immediately so stale carried-over models (e.g. a
+// removed static model) can never stay routable while waiting for the next
+// probe. The reset node is due at once, so the same cycle reprobes it.
 func (p *Poller) reconcile(specs []nodeSpec) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -329,18 +369,22 @@ func (p *Poller) reconcile(specs []nodeSpec) {
 		st, ok := p.state[s.id]
 		if !ok {
 			p.state[s.id] = &nodeRuntime{
-				name:    s.name,
-				baseURL: s.baseURL.String(),
-				health:  registry.HealthUnknown,
+				name:     s.name,
+				identity: s.identity(),
+				health:   registry.HealthUnknown,
 			}
 			continue
 		}
-		if st.baseURL != s.baseURL.String() {
-			st.baseURL = s.baseURL.String()
+		if id := s.identity(); st.identity != id {
+			st.identity = id
 			st.health = registry.HealthUnknown
 			st.failures = 0
 			st.models = nil
 			st.lastProbe = time.Time{}
+			// registry.SetNodes only resets on BaseURL changes; for the
+			// other identity fields it carried the old state over, so
+			// publish the reset explicitly.
+			p.reg.SetNodeProbe(s.id, registry.ProbeResult{Health: registry.HealthUnknown})
 		}
 		if st.name != s.name {
 			p.m.DeleteNodeUp(st.name)
@@ -353,6 +397,7 @@ func (p *Poller) reconcile(specs []nodeSpec) {
 			delete(p.state, id)
 		}
 	}
+	p.lastSpecs = specs
 	p.m.SetOllamaUp(p.anyHealthyLocked())
 }
 
