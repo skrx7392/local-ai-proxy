@@ -219,3 +219,40 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS idx_usage_logs_node_created
     ON usage_logs(node_id, created_at);
+
+-- ---------------------------------------------------------------------------
+-- Pricing re-denomination (OSS-5): canonical rates are credits per MILLION
+-- tokens (per-MTok, the industry convention). Charge math everywhere is
+--   cost = tokens * rate_mtok / 1_000_000
+-- and application code reads/writes ONLY the *_mtok columns below.
+--
+-- The old per-token columns (prompt_rate, completion_rate) are DEPRECATED:
+-- application writes keep them in sync (= rate_mtok / 1e6, rounded to their
+-- 10-decimal scale) purely so a rolled-back binary still reads correct
+-- prices during the transition. They will be DROPPED in a later release.
+--
+-- Idempotency (production-critical): this file is re-executed in full on
+-- EVERY boot. The duplicate_column guards make the ADD COLUMNs no-ops after
+-- the first run, and the backfill only touches rows whose *_mtok value is
+-- still NULL — so re-running the schema can never multiply an
+-- already-converted rate again, and never clobbers a rate later re-priced
+-- through the per-MTok admin API. The x1e6 backfill itself is lossless:
+-- DECIMAL(15,10) * 1e6 needs at most 4 fractional digits, which
+-- DECIMAL(15,6) stores exactly. Pinned by TestRedenomination_MigrationIdempotent
+-- and TestRedenomination_EqualCostProof.
+DO $$ BEGIN
+    ALTER TABLE credit_pricing ADD COLUMN prompt_rate_mtok DECIMAL(15,6);
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE credit_pricing ADD COLUMN completion_rate_mtok DECIMAL(15,6);
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+UPDATE credit_pricing SET prompt_rate_mtok = prompt_rate * 1000000
+    WHERE prompt_rate_mtok IS NULL;
+UPDATE credit_pricing SET completion_rate_mtok = completion_rate * 1000000
+    WHERE completion_rate_mtok IS NULL;

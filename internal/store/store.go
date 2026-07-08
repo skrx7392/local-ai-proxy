@@ -132,14 +132,17 @@ type CreditHold struct {
 	SettledAt *time.Time
 }
 
+// CreditPricing rates are denominated in credits per MILLION tokens
+// (per-MTok, the industry convention): cost = tokens × rate / 1_000_000.
+// Backed by credit_pricing.prompt_rate_mtok / completion_rate_mtok.
 type CreditPricing struct {
-	ID                int64     `json:"id"`
-	ModelID           string    `json:"model_id"`
-	PromptRate        float64   `json:"prompt_rate"`
-	CompletionRate    float64   `json:"completion_rate"`
-	TypicalCompletion int       `json:"typical_completion"`
-	EffectiveFrom     time.Time `json:"effective_from"`
-	Active            bool      `json:"active"`
+	ID                    int64     `json:"id"`
+	ModelID               string    `json:"model_id"`
+	PromptRatePerMTok     float64   `json:"prompt_rate_per_mtok"`
+	CompletionRatePerMTok float64   `json:"completion_rate_per_mtok"`
+	TypicalCompletion     int       `json:"typical_completion"`
+	EffectiveFrom         time.Time `json:"effective_from"`
+	Active                bool      `json:"active"`
 }
 
 type AccountUsageStats struct {

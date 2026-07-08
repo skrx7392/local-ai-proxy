@@ -30,11 +30,15 @@ func EstimateCompletionTokens(maxTokens *int, stats *store.AccountUsageStats, pr
 }
 
 // EstimateCost calculates the credit cost from token counts and pricing.
+// Rates are credits per MILLION tokens: cost = tokens × rate / 1_000_000.
+// The single division at the end keeps the float64 result within 1 ulp of
+// the old per-token math, far inside the 6 decimal places the database
+// stores (see TestEstimateCost_PerMTokMatchesOldPerTokenMath).
 func EstimateCost(pricing *store.CreditPricing, promptTokens, completionTokens int) float64 {
 	if pricing == nil {
 		return 0
 	}
-	return float64(promptTokens)*pricing.PromptRate + float64(completionTokens)*pricing.CompletionRate
+	return (float64(promptTokens)*pricing.PromptRatePerMTok + float64(completionTokens)*pricing.CompletionRatePerMTok) / 1e6
 }
 
 // EstimateFromResponseBytes estimates tokens from response body size.

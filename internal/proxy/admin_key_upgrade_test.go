@@ -29,7 +29,7 @@ func TestLegacyAdminKey_ChatsAfterBackfill(t *testing.T) {
 	defer upstream.Close()
 
 	const model = "llama3:latest"
-	if err := db.UpsertPricing(model, 0.001, 0.001, 100); err != nil {
+	if err := db.UpsertPricing(model, 1000, 1000, 100); err != nil {
 		t.Fatalf("UpsertPricing: %v", err)
 	}
 

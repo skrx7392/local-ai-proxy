@@ -973,28 +973,33 @@ func (h *handler) listPricing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) upsertPricing(w http.ResponseWriter, r *http.Request) {
+	// Rates are credits per MILLION tokens (per-MTok). Strict decoding makes
+	// the re-denomination break loud: the old per-token field names
+	// (prompt_rate / completion_rate) — or any other unknown field — get a
+	// 400 naming the field instead of being silently dropped and then
+	// misreported as missing per-MTok rates.
 	var req struct {
-		ModelID           string  `json:"model_id"`
-		PromptRate        float64 `json:"prompt_rate"`
-		CompletionRate    float64 `json:"completion_rate"`
-		TypicalCompletion int     `json:"typical_completion"`
+		ModelID               string  `json:"model_id"`
+		PromptRatePerMTok     float64 `json:"prompt_rate_per_mtok"`
+		CompletionRatePerMTok float64 `json:"completion_rate_per_mtok"`
+		TypicalCompletion     int     `json:"typical_completion"`
 	}
-	if !apierror.DecodeJSON(w, r, &req) {
+	if !apierror.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.ModelID == "" {
 		proxy.WriteError(w, r, http.StatusBadRequest, "missing_model_id", "invalid_request_error", "model_id is required")
 		return
 	}
-	if req.PromptRate <= 0 || req.CompletionRate <= 0 {
-		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_rates", "invalid_request_error", "prompt_rate and completion_rate must be positive")
+	if req.PromptRatePerMTok <= 0 || req.CompletionRatePerMTok <= 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_rates", "invalid_request_error", "prompt_rate_per_mtok and completion_rate_per_mtok (credits per million tokens) must be positive")
 		return
 	}
 	if req.TypicalCompletion <= 0 {
 		req.TypicalCompletion = 500
 	}
 
-	if err := h.store.UpsertPricing(req.ModelID, req.PromptRate, req.CompletionRate, req.TypicalCompletion); err != nil {
+	if err := h.store.UpsertPricing(req.ModelID, req.PromptRatePerMTok, req.CompletionRatePerMTok, req.TypicalCompletion); err != nil {
 		slog.ErrorContext(r.Context(), "upsert pricing error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to update pricing")
 		return
