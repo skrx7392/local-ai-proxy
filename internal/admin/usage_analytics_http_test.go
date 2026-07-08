@@ -15,14 +15,16 @@ import (
 // seedUsageFixture provisions a small analytics fixture:
 //   - 1 personal account with 1 user-owned key
 //   - 1 service account with 1 service key
+//   - 2 nodes; usage rows split between nodeA, nodeB, and NULL node_id
 //   - usage rows at known timestamps so tests can pick windows that
 //     deterministically select subsets.
 //
-// Returns key IDs and the anchor time `t0`.
+// Returns key IDs, node IDs, and the anchor time `t0`.
 type usageFixture struct {
 	personalAcct, serviceAcct int64
 	userID                    int64
 	keyUser, keyService       int64
+	nodeA, nodeB              int64
 	t0                        time.Time
 }
 
@@ -56,9 +58,19 @@ func seedUsageFixtureHTTP(t *testing.T, s *store.Store) usageFixture {
 		t.Fatalf("link service key to account: %v", err)
 	}
 
+	nodeA, err := s.CreateNode(store.Node{Name: "usage-http-a", BaseURL: "http://usage-http-a:11434"})
+	if err != nil {
+		t.Fatalf("CreateNode a: %v", err)
+	}
+	nodeB, err := s.CreateNode(store.Node{Name: "usage-http-b", BaseURL: "http://usage-http-b:11434"})
+	if err != nil {
+		t.Fatalf("CreateNode b: %v", err)
+	}
+
 	// --- usage rows at fixed timestamps so filter windows are deterministic.
 	// t0 chosen well in the past so a default (now-7d, now) window includes
-	// them. We insert spanning 10 hours starting at t0.
+	// them. We insert spanning 10 hours starting at t0. Node attribution:
+	// nodeA serves rows 0,2,4; nodeB row 1; row 3 predates routing (NULL).
 	t0 := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Hour)
 
 	type row struct {
@@ -69,19 +81,20 @@ func seedUsageFixtureHTTP(t *testing.T, s *store.Store) usageFixture {
 		credit       float64
 		status       string
 		offset       time.Duration
+		nodeID       *int64
 	}
 	rows := []row{
-		{keyUser, "llama3.1:8b", 100, 50, 200, 0.30, "completed", 0},
-		{keyUser, "llama3.1:8b", 200, 100, 300, 0.60, "completed", 1 * time.Hour},
-		{keyUser, "gpt-4o-mini", 50, 25, 150, 0.15, "completed", 2 * time.Hour},
-		{keyService, "llama3.1:8b", 500, 250, 500, 1.50, "completed", 5 * time.Hour},
-		{keyService, "gpt-4o-mini", 20, 10, 80, 0.06, "error", 6 * time.Hour},
+		{keyUser, "llama3.1:8b", 100, 50, 200, 0.30, "completed", 0, &nodeA},
+		{keyUser, "llama3.1:8b", 200, 100, 300, 0.60, "completed", 1 * time.Hour, &nodeB},
+		{keyUser, "gpt-4o-mini", 50, 25, 150, 0.15, "completed", 2 * time.Hour, &nodeA},
+		{keyService, "llama3.1:8b", 500, 250, 500, 1.50, "completed", 5 * time.Hour, nil},
+		{keyService, "gpt-4o-mini", 20, 10, 80, 0.06, "error", 6 * time.Hour, &nodeA},
 	}
 	for _, r := range rows {
 		if _, err := s.Pool().Exec(ctx,
-			`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			r.keyID, r.model, r.prompt, r.comp, r.prompt+r.comp, r.dur, r.status, r.credit, t0.Add(r.offset),
+			`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at, node_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			r.keyID, r.model, r.prompt, r.comp, r.prompt+r.comp, r.dur, r.status, r.credit, t0.Add(r.offset), r.nodeID,
 		); err != nil {
 			t.Fatalf("insert usage: %v", err)
 		}
@@ -96,6 +109,8 @@ func seedUsageFixtureHTTP(t *testing.T, s *store.Store) usageFixture {
 		userID:       uid,
 		keyUser:      keyUser,
 		keyService:   keyService,
+		nodeA:        nodeA,
+		nodeB:        nodeB,
 		t0:           t0,
 	}
 }
@@ -172,6 +187,59 @@ func TestUsageSummary_ModelFilter(t *testing.T) {
 	}
 }
 
+func TestUsageSummary_NodeFilter(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+
+	path := fmt.Sprintf("/api/admin/usage/summary?node_id=%d&since=%s", fx.nodeA, fx.t0.Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data usageSummaryDTO `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// nodeA rows: 150 + 75 + 30 tokens, one error, credits 0.30+0.15+0.06.
+	// The nodeB row and the NULL-node row must be excluded.
+	if body.Data.Requests != 3 {
+		t.Errorf("requests = %d, want 3 (nodeA rows only)", body.Data.Requests)
+	}
+	if body.Data.TotalTokens != 255 {
+		t.Errorf("total_tokens = %d, want 255", body.Data.TotalTokens)
+	}
+	if body.Data.Errors != 1 {
+		t.Errorf("errors = %d, want 1", body.Data.Errors)
+	}
+	if body.Data.Credits < 0.50 || body.Data.Credits > 0.52 {
+		t.Errorf("credits = %f, want ~0.51", body.Data.Credits)
+	}
+}
+
+func TestUsageSummary_NodeFilter_UnknownNodeReturnsZeros(t *testing.T) {
+	// A node_id that matches no rows is not an error — the FE per-node usage
+	// link must render an empty dashboard, not a failure state.
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+
+	path := fmt.Sprintf("/api/admin/usage/summary?node_id=999999&since=%s", fx.t0.Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data usageSummaryDTO `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Data.Requests != 0 || body.Data.TotalTokens != 0 {
+		t.Errorf("expected zero summary for unknown node, got %+v", body.Data)
+	}
+}
+
 // --- by-model -------------------------------------------------------------
 
 func TestUsageByModel_GroupingAndOrder(t *testing.T) {
@@ -227,6 +295,34 @@ func TestUsageByModel_PaginationTotalIsPreSlice(t *testing.T) {
 	}
 }
 
+func TestUsageByModel_NodeFilter(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+
+	path := fmt.Sprintf("/api/admin/usage/by-model?node_id=%d&since=%s", fx.nodeA, fx.t0.Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data []modelUsageDTO `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Data) != 2 {
+		t.Fatalf("len(data) = %d, want 2 models on nodeA, body=%s", len(body.Data), rec.Body.String())
+	}
+	// nodeA: llama = 150 tokens (1 request; the nodeB llama row and the
+	// NULL-node llama row are excluded), gpt = 75+30 = 105 tokens (2 requests).
+	if body.Data[0].Model != "llama3.1:8b" || body.Data[0].Requests != 1 || body.Data[0].TotalTokens != 150 {
+		t.Errorf("unexpected first row: %+v", body.Data[0])
+	}
+	if body.Data[1].Model != "gpt-4o-mini" || body.Data[1].Requests != 2 || body.Data[1].TotalTokens != 105 {
+		t.Errorf("unexpected second row: %+v", body.Data[1])
+	}
+}
+
 // --- by-user --------------------------------------------------------------
 
 func TestUsageByUser_OwnerTypeDerivation(t *testing.T) {
@@ -271,6 +367,44 @@ func TestUsageByUser_OwnerTypeDerivation(t *testing.T) {
 	}
 	if !sawUser || !sawService {
 		t.Errorf("expected both user and service rows; sawUser=%v sawService=%v", sawUser, sawService)
+	}
+}
+
+func TestUsageByUser_NodeFilter(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+
+	path := fmt.Sprintf("/api/admin/usage/by-user?node_id=%d&since=%s", fx.nodeA, fx.t0.Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data []ownerUsageDTO `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Data) != 2 {
+		t.Fatalf("len(data) = %d, want 2 owners on nodeA, body=%s", len(body.Data), rec.Body.String())
+	}
+	for _, row := range body.Data {
+		switch row.OwnerType {
+		case "user":
+			// keyUser rows on nodeA: 150 + 75 tokens across 2 requests. The
+			// nodeB row (300 tokens) is excluded.
+			if row.Requests != 2 || row.TotalTokens != 225 {
+				t.Errorf("user row = %+v, want 2 requests / 225 tokens", row)
+			}
+		case "service":
+			// keyService rows on nodeA: only the error row (30 tokens). The
+			// NULL-node row (750 tokens) is excluded.
+			if row.Requests != 1 || row.TotalTokens != 30 {
+				t.Errorf("service row = %+v, want 1 request / 30 tokens", row)
+			}
+		default:
+			t.Errorf("unexpected owner_type %q", row.OwnerType)
+		}
 	}
 }
 
@@ -417,6 +551,38 @@ func TestUsageTimeseries_EmptyRangeReturnsZeroBuckets(t *testing.T) {
 	}
 }
 
+func TestUsageTimeseries_NodeFilter(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+
+	// nodeA rows sit at t0, t0+2h, t0+6h. Asking for [t0, t0+7h) hourly with
+	// node_id=nodeA must produce 7 buckets with requests only at 0, 2, 6 —
+	// the nodeB row (t0+1h) and the NULL-node row (t0+5h) become zero buckets.
+	since := fx.t0
+	until := fx.t0.Add(7 * time.Hour)
+	path := fmt.Sprintf("/api/admin/usage/timeseries?interval=hour&node_id=%d&since=%s&until=%s",
+		fx.nodeA, since.Format(time.RFC3339), until.Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body timeseriesBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Data.Buckets) != 7 {
+		t.Fatalf("len(buckets) = %d, want 7 hourly buckets", len(body.Data.Buckets))
+	}
+	wantRequests := []int{1, 0, 1, 0, 0, 0, 1}
+	for i, want := range wantRequests {
+		if body.Data.Buckets[i].Requests != want {
+			t.Errorf("bucket[%d].requests = %d, want %d (bucket=%v)",
+				i, body.Data.Buckets[i].Requests, want, body.Data.Buckets[i].Bucket)
+		}
+	}
+}
+
 func TestUsageTimeseries_InvalidInterval(t *testing.T) {
 	h, s := setupAdminTest(t)
 	fx := seedUsageFixtureHTTP(t, s)
@@ -450,6 +616,58 @@ func TestUsageEndpoints_ValidationErrors(t *testing.T) {
 				t.Errorf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+// Own handler (and therefore own X-Admin-Key rate-limit bucket): folding these
+// into TestUsageEndpoints_ValidationErrors would push that test past the
+// 10 req/min admin bucket and turn expected 400s into 429s.
+func TestUsageEndpoints_InvalidNodeID(t *testing.T) {
+	h, _ := setupAdminTest(t)
+
+	for _, path := range []string{
+		"/api/admin/usage/summary?node_id=abc",
+		"/api/admin/usage/by-model?node_id=abc",
+		"/api/admin/usage/by-user?node_id=abc",
+		"/api/admin/usage/timeseries?node_id=abc",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := doAdmin(t, h, path)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestUsageEndpoints_InvalidNodeIDErrorShape(t *testing.T) {
+	// The 400 body must be byte-compatible with the legacy /api/admin/usage
+	// endpoint's node_id error (PR #49): code=invalid_node_id,
+	// type=invalid_request_error, message="Invalid node_id parameter".
+	h, _ := setupAdminTest(t)
+
+	rec := doAdmin(t, h, "/api/admin/usage/summary?node_id=abc")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Error.Code != "invalid_node_id" {
+		t.Errorf("error.code = %q, want invalid_node_id", body.Error.Code)
+	}
+	if body.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type = %q, want invalid_request_error", body.Error.Type)
+	}
+	if body.Error.Message != "Invalid node_id parameter" {
+		t.Errorf("error.message = %q, want %q", body.Error.Message, "Invalid node_id parameter")
 	}
 }
 
