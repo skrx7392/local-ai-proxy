@@ -57,6 +57,12 @@ type handler struct {
 	// node mutations skip the synchronous probe.
 	nodeRegistry  NodeSnapshotter
 	nodeRefresher NodeRefresher
+
+	// OSS-2: initial credit grant applied if createKey has to create the
+	// admin service account (normally main.go creates it at startup, making
+	// this a no-op lookup). Zero in tests is fine — grants can be added via
+	// POST /api/admin/accounts/{id}/credits.
+	adminServiceCreditGrant float64
 }
 
 // NodeSnapshotter exposes the node registry's current routing state.
@@ -85,6 +91,10 @@ type Options struct {
 	// BE 7: node routing registry + poller for /api/admin/nodes.
 	Registry  NodeSnapshotter
 	Refresher NodeRefresher
+
+	// OSS-2: initial grant for the admin service account when created on
+	// demand (see handler.adminServiceCreditGrant).
+	AdminServiceCreditGrant float64
 }
 
 type adminSessionCtxKey struct{}
@@ -99,6 +109,11 @@ func AdminSessionFromContext(ctx context.Context) *store.Session {
 type createKeyRequest struct {
 	Name      string `json:"name"`
 	RateLimit int    `json:"rate_limit"`
+	// AccountID optionally attaches the key to an existing account. When
+	// omitted, the key attaches to the auto-created admin service account
+	// ("admin-service") — keys are always account-backed. Ignored by
+	// createAccountKey, where the path's account ID is authoritative.
+	AccountID *int64 `json:"account_id"`
 }
 
 type createKeyResponse struct {
@@ -107,6 +122,7 @@ type createKeyResponse struct {
 	Key       string `json:"key"`
 	KeyPrefix string `json:"key_prefix"`
 	RateLimit int    `json:"rate_limit"`
+	AccountID int64  `json:"account_id"`
 }
 
 type keyResponse struct {
@@ -132,6 +148,8 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 		metrics:           opts.Metrics,
 		nodeRegistry:      opts.Registry,
 		nodeRefresher:     opts.Refresher,
+
+		adminServiceCreditGrant: opts.AdminServiceCreditGrant,
 	}
 
 	mux := http.NewServeMux()
@@ -320,7 +338,33 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 	keyPrefix := rawKey[:11] // "sk-" + first 8 hex chars
 	keyHash := auth.HashKey(rawKey)
 
-	id, err := h.store.CreateKey(req.Name, keyHash, keyPrefix, req.RateLimit)
+	// Every admin-minted key attaches to an account so the credit gate can
+	// meter it: an explicit account_id wins; otherwise the designated admin
+	// service account (created on demand, idempotent).
+	var accountID int64
+	if req.AccountID != nil {
+		acct, err := h.store.GetAccountByID(*req.AccountID)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "account lookup error", "error", err, "account_id", *req.AccountID)
+			proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to look up account")
+			return
+		}
+		if acct == nil {
+			proxy.WriteError(w, r, http.StatusNotFound, "account_not_found", "invalid_request_error", "Account not found")
+			return
+		}
+		accountID = acct.ID
+	} else {
+		var err error
+		accountID, err = h.store.EnsureAdminServiceAccount(h.adminServiceCreditGrant)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "ensure admin service account error", "error", err)
+			proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to resolve admin service account")
+			return
+		}
+	}
+
+	id, err := h.store.CreateKeyForAccountOnly(accountID, req.Name, keyHash, keyPrefix, req.RateLimit)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "create key error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to create key")
@@ -335,6 +379,7 @@ func (h *handler) createKey(w http.ResponseWriter, r *http.Request) {
 		Key:       rawKey,
 		KeyPrefix: keyPrefix,
 		RateLimit: req.RateLimit,
+		AccountID: accountID,
 	})
 }
 
@@ -743,6 +788,7 @@ func (h *handler) createAccountKey(w http.ResponseWriter, r *http.Request) {
 		Key:       rawKey,
 		KeyPrefix: keyPrefix,
 		RateLimit: req.RateLimit,
+		AccountID: accountID,
 	})
 }
 

@@ -74,14 +74,15 @@ func TestCreditGate_ErrorResponseFormat(t *testing.T) {
 	}
 }
 
-func TestCreditGate_NilAccountID_PassesThrough(t *testing.T) {
+func TestCreditGate_NilAccountID_Returns403(t *testing.T) {
+	// The legacy NULL-account bypass is gone: a key without an account is
+	// rejected, never waved through. Startup backfill guarantees this state
+	// cannot occur in a healthy deployment, so rejecting is fail-closed.
 	db := setupTestStore(t)
 	gate := CreditGate(db, nil)
 
-	called := false
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
+		t.Error("handler should not be called for nil AccountID")
 	}))
 
 	// Key without AccountID
@@ -91,11 +92,64 @@ func TestCreditGate_NilAccountID_PassesThrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
-	if !called {
-		t.Error("expected handler to be called for nil AccountID")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rec.Code)
 	}
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
+	if rec.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("expected application/json content type")
+	}
+}
+
+func TestCreditGate_LegacyAdminKey_UpgradePath(t *testing.T) {
+	// Production upgrade scenario: a live admin-created key with NULL
+	// account_id (pre-upgrade it chatted via the old bypass). After the
+	// startup backfill it must chat again — attached to the admin service
+	// account, metered like every other key.
+	db := setupTestStore(t)
+	gate := CreditGate(db, nil)
+
+	rawHash := "legacy-hash-upgrade"
+	if _, err := db.CreateKey("legacy-admin", rawHash, "sk-legacy", 60); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+
+	serve := func() (int, bool) {
+		called := false
+		handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		key, err := db.GetKeyByHash(rawHash)
+		if err != nil {
+			t.Fatalf("GetKeyByHash: %v", err)
+		}
+		if key == nil {
+			t.Fatal("expected key to exist")
+		}
+		req := httptest.NewRequest("GET", "/test", nil)
+		req = req.WithContext(auth.WithKey(req.Context(), key))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code, called
+	}
+
+	// Before the backfill runs, the gate fails closed.
+	if code, called := serve(); code != http.StatusForbidden || called {
+		t.Errorf("pre-backfill: expected 403 and handler not called, got %d called=%v", code, called)
+	}
+
+	// Startup migration: ensure the admin service account, attach legacy keys.
+	adminAccID, err := db.EnsureAdminServiceAccount(1000)
+	if err != nil {
+		t.Fatalf("EnsureAdminServiceAccount: %v", err)
+	}
+	if _, err := db.BackfillAdminKeyAccounts(adminAccID); err != nil {
+		t.Fatalf("BackfillAdminKeyAccounts: %v", err)
+	}
+
+	// The same key now passes the gate via the service account.
+	if code, called := serve(); code != http.StatusOK || !called {
+		t.Errorf("post-backfill: expected 200 and handler called, got %d called=%v", code, called)
 	}
 }
 

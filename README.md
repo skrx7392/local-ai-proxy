@@ -71,7 +71,7 @@ Readiness = DB ok **and** usage writer ok **and** (*zero enabled nodes* **or** *
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/admin/keys` | Create API key (`{name, rate_limit}`) — returns full key once, never retrievable again |
+| `POST` | `/api/admin/keys` | Create API key (`{name, rate_limit, account_id?}`) — attaches to the given account (404 if unknown), or to the auto-created `admin-service` account when `account_id` is omitted; response includes `account_id`; returns full key once, never retrievable again |
 | `GET` | `/api/admin/keys` | List all keys (id, name, key_prefix, rate_limit, created_at, revoked) |
 | `GET` | `/api/admin/keys/{id}` | Key detail |
 | `PUT` | `/api/admin/keys/{id}/rate-limit` | Update a key's rate limit |
@@ -92,6 +92,14 @@ Readiness = DB ok **and** usage writer ok **and** (*zero enabled nodes* **or** *
 | `GET` | `/api/admin/config` | Effective config snapshot (includes `models_list_all`, `nodes_file`) |
 | `GET` | `/api/admin/health` | Component health: db, **nodes** (total/healthy counts), usage writer, uptime |
 | `POST` | `/api/admin/bootstrap` | One-time first-admin bootstrap (404 unless `ADMIN_BOOTSTRAP_TOKEN` is set) |
+
+#### Admin keys and the `admin-service` account
+
+Every API key is **account-backed and credit-gated** — there is no bypass. Admin-minted keys attach to an account like any other key:
+
+- `POST /api/admin/keys` with `account_id` binds the key to that existing account (same effect as `POST /api/admin/accounts/{id}/keys`).
+- Without `account_id`, the key attaches to the designated **`admin-service`** account, auto-created at startup with a one-time starting balance (`ADMIN_SERVICE_CREDIT_GRANT`, default 1,000,000 credits). Top it up any time via `POST /api/admin/accounts/{id}/credits`.
+- On upgrade, a startup backfill attaches all pre-existing NULL-account keys to their owner's account (user keys) or to `admin-service` (admin keys), so live keys keep working. Because those keys are now credit-gated, requests for **unpriced models return `400 unknown_model`** — add pricing for the models you serve (`POST /api/admin/pricing`).
 
 #### Node management
 
@@ -170,9 +178,9 @@ Pricing is also **required** for any credit-backed key (keys created for user or
 The middleware chain (auth → credit gate → rate limit) runs before routing, so `401`/`402`/`429` always precede `503 model_unavailable`. Within the proxy handler, order matters:
 
 1. Body read into memory (capped by `MAX_REQUEST_BODY`) and validated: malformed JSON or a missing/empty `model` → `400` (OpenAI-shaped `invalid_request_error`).
-2. Pricing check (credit-backed keys only): unpriced model → `400 unknown_model`; session token limit checked.
+2. Pricing check: unpriced model → `400 unknown_model`; session token limit checked. (All keys are credit-backed — the startup backfill attaches legacy NULL-account keys to the `admin-service` account.)
 3. **`Resolve(model)`** against the registry snapshot: no healthy node serving the model → `503 model_unavailable`. Resolution happens **before** any credit hold, so node outages cause zero hold churn.
-4. Credits reserved (credit-backed keys only).
+4. Credits reserved.
 5. Forward to `{node.base_url}/v1/chat/completions` with the node's `auth_header` (the client's own `Authorization` is stripped and never forwarded) under the node's timeout budget (`timeout_seconds`, default 5 minutes, applied as a per-request context deadline).
 
 The upstream client never follows redirects (a redirect with `auth_header` attached could exfiltrate node credentials — a redirecting upstream fails the request), and non-streaming/error response bodies are read through the `MAX_REQUEST_BODY` cap.
@@ -205,7 +213,7 @@ api_keys (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   revoked     BOOLEAN NOT NULL DEFAULT FALSE,
   user_id     BIGINT REFERENCES users(id),  -- NULL = admin-created key
-  account_id  BIGINT REFERENCES accounts(id) -- NULL = key not credit-backed
+  account_id  BIGINT REFERENCES accounts(id) -- billing account; backfilled at startup, never NULL afterwards
 )
 
 usage_logs (
@@ -266,6 +274,7 @@ All configuration via environment variables:
 | `MODELS_LIST_ALL` | `false` | `GET /v1/models` lists every actively priced model instead of the priced-AND-served intersection |
 | `ADMIN_BOOTSTRAP_TOKEN` | *(none)* | Enables `POST /api/admin/bootstrap` (one-time first-admin creation) when set |
 | `DEFAULT_CREDIT_GRANT` | `0` | Credits granted to newly registered accounts |
+| `ADMIN_SERVICE_CREDIT_GRANT` | `1000000` | One-time starting balance for the auto-created `admin-service` account (applied at creation only — top up later via `POST /api/admin/accounts/{id}/credits`; must be >= 0) |
 | `PORT` | `8080` | Server listen port |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes (chat proxy path); also caps upstream non-streaming/error response reads |
