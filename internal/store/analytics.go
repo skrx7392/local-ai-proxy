@@ -87,7 +87,10 @@ func buildUsageFilterClause(sb *strings.Builder, args []any, f UsageFilter, argI
 		argIdx++
 	}
 	if f.AccountID != nil {
-		fmt.Fprintf(sb, " AND k.account_id = $%d", argIdx)
+		// Billing attribution: prefer the per-row billing account (end-user
+		// accounts on trusted keys, EUA); fall back to the key's account for
+		// pre-attribution rows.
+		fmt.Fprintf(sb, " AND COALESCE(ul.account_id, k.account_id) = $%d", argIdx)
 		args = append(args, *f.AccountID)
 		argIdx++
 	}
@@ -194,7 +197,7 @@ func (s *Store) GetUsageByUser(f UsageFilter) ([]OwnerUsageRow, error) {
 		   k.user_id,
 		   usr.email,
 		   usr.name,
-		   k.account_id,
+		   COALESCE(ul.account_id, k.account_id),
 		   a.name,
 		   a.type,
 		   COUNT(*),
@@ -204,11 +207,11 @@ func (s *Store) GetUsageByUser(f UsageFilter) ([]OwnerUsageRow, error) {
 		 FROM usage_logs ul
 		 JOIN api_keys k ON ul.api_key_id = k.id
 		 LEFT JOIN users usr ON usr.id = k.user_id
-		 LEFT JOIN accounts a ON a.id = k.account_id
+		 LEFT JOIN accounts a ON a.id = COALESCE(ul.account_id, k.account_id)
 		 WHERE 1=1`)
 	args, _ := buildUsageFilterClause(&sb, nil, f, 1)
 	sb.WriteString(
-		` GROUP BY k.user_id, usr.email, usr.name, k.account_id, a.name, a.type
+		` GROUP BY k.user_id, usr.email, usr.name, COALESCE(ul.account_id, k.account_id), a.name, a.type
 		  ORDER BY COALESCE(SUM(ul.total_tokens), 0) DESC`)
 
 	rows, err := s.pool.Query(context.Background(), sb.String(), args...)

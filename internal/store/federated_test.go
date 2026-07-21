@@ -336,3 +336,100 @@ func TestLogUsage_AccountAttribution(t *testing.T) {
 		t.Fatalf("LogUsage legacy: %v", err)
 	}
 }
+
+// Analytics must attribute rows by the BILLING account (usage_logs.account_id)
+// with a fallback to the key's account for pre-attribution rows — the Codex P1
+// from the EUA-2 review.
+func TestAnalytics_BillingAccountAttribution(t *testing.T) {
+	s := setupTestStore(t)
+	now := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
+
+	sharedAcc, sharedUser, err := s.RegisterUser("shared-analytics@example.com", "hash", "Shared")
+	if err != nil {
+		t.Fatalf("RegisterUser: %v", err)
+	}
+	keyID, err := s.CreateKeyForAccount(sharedUser, sharedAcc, "openwebui-shared", "hash-analytics", "laip_an", 60)
+	if err != nil {
+		t.Fatalf("CreateKeyForAccount: %v", err)
+	}
+
+	endUser, err := s.ResolveEndUserAccount(resolveArgs("owui-analytics"), 5.0, now)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// One end-user-attributed row, one legacy row (NULL account_id).
+	if err := s.LogUsage(UsageEntry{APIKeyID: keyID, Model: "gemma4:e4b", TotalTokens: 100,
+		CreditsCharged: 0.2, Status: "completed", AccountID: &endUser.AccountID}); err != nil {
+		t.Fatalf("LogUsage attributed: %v", err)
+	}
+	if err := s.LogUsage(UsageEntry{APIKeyID: keyID, Model: "gemma4:e4b", TotalTokens: 40,
+		CreditsCharged: 0.1, Status: "completed"}); err != nil {
+		t.Fatalf("LogUsage legacy: %v", err)
+	}
+
+	// Filter by end-user account: only the attributed row.
+	sum, err := s.GetUsageSummary(UsageFilter{AccountID: &endUser.AccountID})
+	if err != nil {
+		t.Fatalf("GetUsageSummary(end user): %v", err)
+	}
+	if sum.TotalTokens != 100 {
+		t.Errorf("end-user filter: expected 100 tokens, got %d", sum.TotalTokens)
+	}
+
+	// Filter by shared account: only the legacy row (fallback via key join).
+	sum, err = s.GetUsageSummary(UsageFilter{AccountID: &sharedAcc})
+	if err != nil {
+		t.Fatalf("GetUsageSummary(shared): %v", err)
+	}
+	if sum.TotalTokens != 40 {
+		t.Errorf("shared filter: expected 40 tokens (legacy fallback), got %d", sum.TotalTokens)
+	}
+
+	// By-user rollup: the end-user account appears as its own owner row.
+	rows, err := s.GetUsageByUser(UsageFilter{})
+	if err != nil {
+		t.Fatalf("GetUsageByUser: %v", err)
+	}
+	var foundEndUser bool
+	for _, r := range rows {
+		if r.AccountID != nil && *r.AccountID == endUser.AccountID {
+			foundEndUser = true
+			if r.TotalTokens != 100 {
+				t.Errorf("end-user owner row: expected 100 tokens, got %d", r.TotalTokens)
+			}
+		}
+	}
+	if !foundEndUser {
+		t.Error("expected an owner row for the end-user account")
+	}
+}
+
+// All key-listing paths must surface trust_user_headers consistently — the
+// Codex P2 from the EUA-2 review (ListKeysByUser dropped it).
+func TestListKeysByUser_SurfacesTrustFlag(t *testing.T) {
+	s := setupTestStore(t)
+
+	_, userID, err := s.RegisterUser("trust-list@example.com", "hash", "TrustList")
+	if err != nil {
+		t.Fatalf("RegisterUser: %v", err)
+	}
+	keyID, err := s.CreateKeyForUser(userID, "user-key", "hash-user-trust", "laip_ut", 60)
+	if err != nil {
+		t.Fatalf("CreateKeyForUser: %v", err)
+	}
+	if err := s.SetTrustUserHeaders(keyID, true); err != nil {
+		t.Fatalf("SetTrustUserHeaders: %v", err)
+	}
+
+	keys, err := s.ListKeysByUser(userID)
+	if err != nil {
+		t.Fatalf("ListKeysByUser: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	if !keys[0].TrustUserHeaders {
+		t.Error("ListKeysByUser must surface trust_user_headers=true")
+	}
+}

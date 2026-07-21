@@ -791,7 +791,7 @@ func (s *Store) CreateKeyForUser(userID int64, name, keyHash, keyPrefix string, 
 func (s *Store) ListKeysByUser(userID int64) ([]APIKey, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
-		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit, trust_user_headers
 		 FROM api_keys WHERE user_id = $1 ORDER BY id`, userID,
 	)
 	if err != nil {
@@ -803,7 +803,7 @@ func (s *Store) ListKeysByUser(userID int64) ([]APIKey, error) {
 	for rows.Next() {
 		var k APIKey
 		if err := rows.Scan(&k.ID, &k.Name, &k.KeyHash, &k.KeyPrefix, &k.RateLimit, &k.CreatedAt, &k.Revoked,
-			&k.UserID, &k.AccountID, &k.SessionTokenLimit); err != nil {
+			&k.UserID, &k.AccountID, &k.SessionTokenLimit, &k.TrustUserHeaders); err != nil {
 			return nil, err
 		}
 		keys = append(keys, k)
