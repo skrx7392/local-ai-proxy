@@ -3,6 +3,7 @@ package admin
 import (
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -87,6 +88,35 @@ type timeseriesResponseDTO struct {
 	Buckets  []timeseriesBucketDTO `json:"buckets"`
 }
 
+type modelSeriesBucketDTO struct {
+	Bucket           time.Time `json:"bucket"`
+	Requests         int       `json:"requests"`
+	Errors           int       `json:"errors"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	TotalTokens      int       `json:"total_tokens"`
+	Credits          float64   `json:"credits"`
+	TokPerSec        *float64  `json:"tok_per_sec"`
+	AvgDurationMs    float64   `json:"avg_duration_ms"`
+	P95DurationMs    *float64  `json:"p95_duration_ms"`
+}
+
+type modelSeriesDTO struct {
+	Model   string                 `json:"model"`
+	Buckets []modelSeriesBucketDTO `json:"buckets"`
+}
+
+// timeseriesByModelResponseDTO is the payload for
+// GET /api/admin/usage/timeseries-by-model — a detail envelope like
+// /usage/timeseries (Locked Decision #20). Every series is gap-filled over
+// the same [since, until) window so chart x-axes align without client-side
+// bucket reconciliation. Series are ordered by window total_tokens desc and
+// capped at maxTimeseriesModels.
+type timeseriesByModelResponseDTO struct {
+	Interval string           `json:"interval"`
+	Series   []modelSeriesDTO `json:"series"`
+}
+
 // --- Query parsing ---------------------------------------------------------
 
 const (
@@ -97,6 +127,11 @@ const (
 	// for the timeseries endpoint flips from "hour" to "day". Callers can
 	// always override via ?interval=.
 	intervalHourCutoff = 48 * time.Hour
+	// maxTimeseriesModels bounds the per-model timeseries response: request
+	// bodies can carry arbitrary model names (error rows log them verbatim),
+	// so cardinality is client-controlled. 12 matches the FE chart palette;
+	// the cut keeps the highest window token totals.
+	maxTimeseriesModels = 12
 )
 
 // parseTimeParam accepts RFC3339 or YYYY-MM-DD. Returns a descriptive error
@@ -429,6 +464,71 @@ func (h *handler) getUsageTimeseries(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeEnvelope(w, timeseriesResponseDTO{Interval: interval, Buckets: dtos}, nil)
+}
+
+func (h *handler) getUsageTimeseriesByModel(w http.ResponseWriter, r *http.Request) {
+	f, code, msg, err := parseUsageFilter(r, time.Now())
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, code, "invalid_request_error", msg)
+		return
+	}
+	interval, icode, imsg, ierr := parseInterval(r, *f.Since, *f.Until)
+	if ierr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, icode, "invalid_request_error", imsg)
+		return
+	}
+
+	rows, err := h.store.GetUsageTimeseriesByModel(f, interval)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "usage timeseries by model error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get usage timeseries by model")
+		return
+	}
+
+	// Rank models by window token total, keep the top maxTimeseriesModels.
+	byModel := make(map[string][]store.ModelTimeseriesRow)
+	totals := make(map[string]int)
+	order := make([]string, 0)
+	for _, row := range rows {
+		if _, seen := byModel[row.Model]; !seen {
+			order = append(order, row.Model)
+		}
+		byModel[row.Model] = append(byModel[row.Model], row)
+		totals[row.Model] += row.TotalTokens
+	}
+	sort.SliceStable(order, func(i, j int) bool { return totals[order[i]] > totals[order[j]] })
+	if len(order) > maxTimeseriesModels {
+		order = order[:maxTimeseriesModels]
+	}
+
+	// Dense, aligned series: one bucket per interval step in [since, until)
+	// for every model, zero-filled with null speed/p95 where no rows exist.
+	series := make([]modelSeriesDTO, 0, len(order))
+	for _, model := range order {
+		next := make(map[time.Time]store.ModelTimeseriesRow, len(byModel[model]))
+		for _, row := range byModel[model] {
+			next[row.Bucket] = row
+		}
+		buckets := make([]modelSeriesBucketDTO, 0)
+		for cur := truncateToInterval(*f.Since, interval); cur.Before(*f.Until); cur = advanceBucket(cur, interval) {
+			dto := modelSeriesBucketDTO{Bucket: cur}
+			if row, ok := next[cur]; ok {
+				dto.Requests = row.Requests
+				dto.Errors = row.Errors
+				dto.PromptTokens = row.PromptTokens
+				dto.CompletionTokens = row.CompletionTokens
+				dto.TotalTokens = row.TotalTokens
+				dto.Credits = row.Credits
+				dto.TokPerSec = row.TokPerSec
+				dto.AvgDurationMs = row.AvgDurationMs
+				dto.P95DurationMs = row.P95DurationMs
+			}
+			buckets = append(buckets, dto)
+		}
+		series = append(series, modelSeriesDTO{Model: model, Buckets: buckets})
+	}
+
+	writeEnvelope(w, timeseriesByModelResponseDTO{Interval: interval, Series: series}, nil)
 }
 
 // deriveOwnerType maps the three populations documented in PLAN.md §By-User.

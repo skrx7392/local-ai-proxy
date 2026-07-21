@@ -101,6 +101,23 @@ type TimeseriesBucket struct {
 	Errors           int
 }
 
+// ModelTimeseriesRow is one (bucket, model) cell of GetUsageTimeseriesByModel.
+// TokPerSec and P95DurationMs follow the ModelUsageRow semantics: computed
+// over completed rows only, nil when the cell has none.
+type ModelTimeseriesRow struct {
+	Bucket           time.Time
+	Model            string
+	Requests         int
+	Errors           int
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	Credits          float64
+	TokPerSec        *float64
+	AvgDurationMs    float64
+	P95DurationMs    *float64
+}
+
 // buildUsageFilterClause appends WHERE conditions derived from f to the given
 // string builder, starting at argIdx. It returns the updated args slice and
 // the next argument index.
@@ -384,6 +401,63 @@ func (s *Store) GetUsageTimeseries(f UsageFilter, interval string) ([]Timeseries
 			return nil, fmt.Errorf("scan bucket: %w", err)
 		}
 		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// GetUsageTimeseriesByModel returns per-(bucket, model) aggregates, ordered
+// by model then bucket ascending. interval must be "hour" or "day".
+// Gap-filling and top-N model selection are the caller's responsibility.
+// Metric semantics match GetUsageByModel: speed uses completed rows that
+// recorded completion tokens, p95 covers all completed rows, avg covers
+// every row.
+func (s *Store) GetUsageTimeseriesByModel(f UsageFilter, interval string) ([]ModelTimeseriesRow, error) {
+	switch interval {
+	case "hour", "day":
+	default:
+		return nil, fmt.Errorf("invalid interval %q: must be 'hour' or 'day'", interval)
+	}
+
+	var sb strings.Builder
+	// date_trunc stays explicitly UTC for the same reason as GetUsageTimeseries:
+	// handler gap-fill keys on UTC bucket boundaries.
+	sb.WriteString(
+		`SELECT
+		   date_trunc($1, ul.created_at AT TIME ZONE 'UTC'),
+		   ul.model,
+		   COUNT(*),
+		   COUNT(*) FILTER (WHERE ul.status = 'error'),
+		   COALESCE(SUM(ul.prompt_tokens), 0),
+		   COALESCE(SUM(ul.completion_tokens), 0),
+		   COALESCE(SUM(ul.total_tokens), 0),
+		   COALESCE(SUM(ul.credits_charged), 0),
+		   SUM(ul.completion_tokens) FILTER (WHERE ul.status = 'completed' AND ul.completion_tokens > 0 AND ul.duration_ms > 0)::float8
+		     / NULLIF(SUM(ul.duration_ms) FILTER (WHERE ul.status = 'completed' AND ul.completion_tokens > 0 AND ul.duration_ms > 0) / 1000.0, 0),
+		   COALESCE(AVG(ul.duration_ms), 0),
+		   percentile_cont(0.95) WITHIN GROUP (ORDER BY ul.duration_ms) FILTER (WHERE ul.status = 'completed')
+		 FROM usage_logs ul
+		 JOIN api_keys k ON ul.api_key_id = k.id
+		 WHERE 1=1`)
+
+	args := []any{interval}
+	args, _ = buildUsageFilterClause(&sb, args, f, 2)
+	sb.WriteString(` GROUP BY 1, 2 ORDER BY 2, 1`)
+
+	rows, err := s.pool.Query(context.Background(), sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("usage timeseries by model: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]ModelTimeseriesRow, 0)
+	for rows.Next() {
+		var r ModelTimeseriesRow
+		if err := rows.Scan(&r.Bucket, &r.Model, &r.Requests, &r.Errors, &r.PromptTokens,
+			&r.CompletionTokens, &r.TotalTokens, &r.Credits, &r.TokPerSec,
+			&r.AvgDurationMs, &r.P95DurationMs); err != nil {
+			return nil, fmt.Errorf("scan model timeseries row: %w", err)
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
