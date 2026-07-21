@@ -859,6 +859,176 @@ func TestUsageTimeseries_InvalidInterval(t *testing.T) {
 	}
 }
 
+// --- timeseries-by-model ---------------------------------------------------
+
+func TestUsageTimeseriesByModel_SeriesMetricsAndGapFill(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+	seedPerfMetricsUsage(t, s, fx)
+
+	path := fmt.Sprintf("/api/admin/usage/timeseries-by-model?interval=hour&since=%s&until=%s",
+		fx.t0.Format(time.RFC3339), fx.t0.Add(3*time.Hour).Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Data       timeseriesByModelResponseDTO `json:"data"`
+		Pagination *Pagination                  `json:"pagination"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Pagination != nil {
+		t.Error("timeseries-by-model is a detail envelope; pagination must be absent")
+	}
+	if body.Data.Interval != "hour" {
+		t.Errorf("interval = %q, want hour", body.Data.Interval)
+	}
+
+	// Series ordered by window total_tokens desc:
+	// bench 970 > llama 450 (rows at t0, t0+1h) > gpt 75 > allfail 10.
+	models := make([]string, len(body.Data.Series))
+	for i, s := range body.Data.Series {
+		models[i] = s.Model
+	}
+	want := []string{"bench:7b", "llama3.1:8b", "gpt-4o-mini", "allfail:1b"}
+	if len(models) != len(want) {
+		t.Fatalf("series models = %v, want %v", models, want)
+	}
+	for i := range want {
+		if models[i] != want[i] {
+			t.Fatalf("series models = %v, want %v", models, want)
+		}
+	}
+
+	// Every series is dense over [since, until): exactly 3 aligned hour buckets.
+	for _, series := range body.Data.Series {
+		if len(series.Buckets) != 3 {
+			t.Fatalf("%s: len(buckets) = %d, want 3", series.Model, len(series.Buckets))
+		}
+		for i, b := range series.Buckets {
+			wantBucket := fx.t0.Add(time.Duration(i) * time.Hour)
+			if !b.Bucket.Equal(wantBucket) {
+				t.Errorf("%s bucket[%d] = %v, want %v", series.Model, i, b.Bucket, wantBucket)
+			}
+		}
+	}
+
+	bench := body.Data.Series[0]
+	b0 := bench.Buckets[0]
+	if b0.Requests != 5 || b0.Errors != 1 {
+		t.Errorf("bench[0] requests/errors = %d/%d, want 5/1", b0.Requests, b0.Errors)
+	}
+	if b0.PromptTokens != 330 || b0.CompletionTokens != 640 || b0.TotalTokens != 970 {
+		t.Errorf("bench[0] tokens = %d/%d/%d, want 330/640/970",
+			b0.PromptTokens, b0.CompletionTokens, b0.TotalTokens)
+	}
+	if b0.TokPerSec == nil || *b0.TokPerSec < 199.99 || *b0.TokPerSec > 200.01 {
+		t.Errorf("bench[0] tok_per_sec = %v, want 200", b0.TokPerSec)
+	}
+	if b0.P95DurationMs == nil || *b0.P95DurationMs < 2899.99 || *b0.P95DurationMs > 2900.01 {
+		t.Errorf("bench[0] p95 = %v, want 2900", b0.P95DurationMs)
+	}
+	// avg covers all 5 rows: (1000+2000+3000+100+500)/5 = 1320.
+	if b0.AvgDurationMs < 1319.99 || b0.AvgDurationMs > 1320.01 {
+		t.Errorf("bench[0] avg = %v, want 1320", b0.AvgDurationMs)
+	}
+	// Gap-filled buckets: zero counts, null speed/percentiles.
+	for i := 1; i <= 2; i++ {
+		gb := bench.Buckets[i]
+		if gb.Requests != 0 || gb.TotalTokens != 0 {
+			t.Errorf("bench[%d] not zero-filled: %+v", i, gb)
+		}
+		if gb.TokPerSec != nil || gb.P95DurationMs != nil {
+			t.Errorf("bench[%d] speed/p95 = %v/%v, want null", i, gb.TokPerSec, gb.P95DurationMs)
+		}
+	}
+
+	// llama has one real row in bucket 0 (150 tok) and one in bucket 1 (300).
+	llama := body.Data.Series[1]
+	if llama.Buckets[0].TotalTokens != 150 || llama.Buckets[1].TotalTokens != 300 || llama.Buckets[2].TotalTokens != 0 {
+		t.Errorf("llama totals = %d/%d/%d, want 150/300/0",
+			llama.Buckets[0].TotalTokens, llama.Buckets[1].TotalTokens, llama.Buckets[2].TotalTokens)
+	}
+
+	// allfail has no completed rows anywhere: null speed/p95 even in its real bucket.
+	allfail := body.Data.Series[3]
+	if allfail.Buckets[0].Errors != 1 || allfail.Buckets[0].TokPerSec != nil || allfail.Buckets[0].P95DurationMs != nil {
+		t.Errorf("allfail[0] = %+v, want errors=1 and null speed/p95", allfail.Buckets[0])
+	}
+}
+
+func TestUsageTimeseriesByModel_CapsSeriesAtTopModels(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+	ctx := context.Background()
+
+	// 14 extra models, one completed row each, descending token weight so the
+	// expected cut is deterministic (weight 14000 down to 1000).
+	for i := 1; i <= 14; i++ {
+		if _, err := s.Pool().Exec(ctx,
+			`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at)
+			 VALUES ($1, $2, $3, 0, $3, 100, 'completed', 0, $4)`,
+			fx.keyUser, fmt.Sprintf("capmodel-%02d", i), i*1000, fx.t0,
+		); err != nil {
+			t.Fatalf("insert cap row: %v", err)
+		}
+	}
+
+	path := fmt.Sprintf("/api/admin/usage/timeseries-by-model?interval=hour&since=%s&until=%s",
+		fx.t0.Format(time.RFC3339), fx.t0.Add(time.Hour).Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data timeseriesByModelResponseDTO `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Data.Series) != maxTimeseriesModels {
+		t.Fatalf("len(series) = %d, want cap %d", len(body.Data.Series), maxTimeseriesModels)
+	}
+	// Top of the cut must be the heaviest extra model; fixture models with
+	// less window traffic than the cut line must be gone.
+	if body.Data.Series[0].Model != "capmodel-14" {
+		t.Errorf("series[0] = %q, want capmodel-14", body.Data.Series[0].Model)
+	}
+	for _, sr := range body.Data.Series {
+		if sr.Model == "capmodel-01" {
+			t.Error("capmodel-01 (lightest) should have been cut by the cap")
+		}
+	}
+}
+
+func TestUsageTimeseriesByModel_Validation(t *testing.T) {
+	// Own handler: keeps the shared validation table under the 10 req/min
+	// admin bucket.
+	h, _ := setupAdminTest(t)
+	for _, path := range []string{
+		"/api/admin/usage/timeseries-by-model?interval=fortnight",
+		"/api/admin/usage/timeseries-by-model?since=2026-04-10&until=2026-04-10",
+		// Oversized gap-fill windows are rejected on BOTH timeseries
+		// endpoints, not silently allocated (1970→9999 hourly ≈ 70M buckets).
+		"/api/admin/usage/timeseries-by-model?interval=hour&since=1970-01-01&until=9999-01-01",
+		"/api/admin/usage/timeseries?interval=hour&since=1970-01-01&until=9999-01-01",
+		"/api/admin/usage/timeseries?interval=day&since=1970-01-01&until=9999-01-01",
+	} {
+		rec := doAdmin(t, h, path)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 (body=%s)", path, rec.Code, rec.Body.String())
+		}
+	}
+	// A window right at the cap still works: 83 days hourly = 1992 buckets.
+	rec := doAdmin(t, h, "/api/admin/usage/timeseries?interval=hour&since=2026-01-01&until=2026-03-25")
+	if rec.Code != http.StatusOK {
+		t.Errorf("at-cap window: status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
 // --- validation -----------------------------------------------------------
 
 func TestUsageEndpoints_ValidationErrors(t *testing.T) {
@@ -899,6 +1069,7 @@ func TestUsageEndpoints_InvalidNodeID(t *testing.T) {
 		"/api/admin/usage/by-user?node_id=abc",
 		"/api/admin/usage/by-account?node_id=abc",
 		"/api/admin/usage/timeseries?node_id=abc",
+		"/api/admin/usage/timeseries-by-model?node_id=abc",
 	} {
 		t.Run(path, func(t *testing.T) {
 			rec := doAdmin(t, h, path)
@@ -951,6 +1122,7 @@ func TestUsageEndpoints_RequireAuth(t *testing.T) {
 		"/api/admin/usage/by-user",
 		"/api/admin/usage/by-account",
 		"/api/admin/usage/timeseries",
+		"/api/admin/usage/timeseries-by-model",
 	} {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
