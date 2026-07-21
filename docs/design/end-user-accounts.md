@@ -52,9 +52,13 @@ CREATE TABLE IF NOT EXISTS federated_identities (
 );
 ```
 
-First sight of an identity (inside one transaction, concurrency-safe via
-`ON CONFLICT (source, external_id) DO NOTHING` + re-select, mirroring
-`EnsureAdminServiceAccount`):
+First sight of an identity — all four inserts in ONE transaction. Concurrency: the
+identity insert uses `ON CONFLICT (source, external_id) DO NOTHING RETURNING id`; a
+loser (no row returned) **rolls back its whole transaction** — discarding its
+provisional account, balance, and registration event — and adopts the winner's
+account via re-select. No advisory lock needed; the UNIQUE constraint elects the
+winner and the rollback guarantees no orphans (race-tested, including
+no-orphan-accounts assertions):
 
 1. `accounts` row: `type='end_user'`, `name` = email (fallback: display name, then
    `openwebui:<external_id>`), `allowance_managed=TRUE`.
@@ -102,31 +106,60 @@ WHERE account_id = $id
 - Non-allowance accounts (`allowance_managed=FALSE`, i.e. every account that exists
   today) are completely unaffected.
 
+### Cap softness (accepted, documented)
+
+The cap is enforced at reserve time; settlement subtracts the **actual** cost even
+when it exceeds the estimate, so a balance can go slightly negative on the last
+request of the month. The overrun is bounded by a single response (~cents at current
+pricing: a full 100k-token completion on gemma4:e4b is $0.04). The next monthly reset
+normalizes it. Revisit with hard mid-stream enforcement only if per-request costs grow
+orders of magnitude.
+
+Two related edges, same acceptance rationale:
+- A pending hold that crosses the month boundary settles against the fresh grant
+  (seconds-long window; stale holds are already swept).
+- Manual `AddCredits` to an allowance-managed account does **not** survive the next
+  monthly reset (reset-to-grant semantics). To give someone more headroom, raise
+  `monthly_grant` — don't hand-grant credits.
+
 ## 4. Proxy billing resolution
 
-`handleChatCompletions` gains one resolution step after auth:
+The live chain is `authMiddleware(creditGate(proxyHandler))`, and `CreditGate`
+pre-checks the **key's** account — so resolution cannot live inside the handler or
+the gate would reject end users based on the shared account's state (and end-user
+402s would never reference their own balance).
+
+Instead, a dedicated **billing resolution middleware** sits between auth and the
+gate:
 
 ```
-billingAccountID := key.AccountID
-if key.TrustUserHeaders && X-OpenWebUI-User-Id != "" {
-    billingAccountID = store.EnsureFederatedAccount(...)   // provision + allowance top-up
-}
+authMiddleware( billingResolver( creditGate( proxyHandler )))
 ```
 
-Everything already keyed on the account follows `billingAccountID`: the pricing gate,
-usage-stats estimation (`GetAccountUsageStats` / `UpdateAccountUsageStats`),
-`ReserveCredits`, settle attribution. The per-key session token limit stays per-KEY
-(it protects the key, not the person).
+`billingResolver`: when the context key has `trust_user_headers` and
+`X-OpenWebUI-User-Id` is present, call `ResolveEndUserAccount` (provision + allowance
+top-up) and stash `{AccountID, AllowanceManaged}` in the request context; otherwise
+stash the key's own account. `CreditGate` and `handleChatCompletions` consume the
+stashed resolution instead of `key.AccountID` — the gate's active/balance pre-check,
+usage-stats estimation, `ReserveCredits`, settle attribution, and the usage-log row
+all follow the billing account. The per-key session token limit stays per-KEY (it
+protects the credential; the allowance protects the person).
 
-402 semantics: for an allowance-managed account the error becomes
-`monthly_limit_reached` ("Monthly usage limit reached — resets next month") instead of
-`insufficient_credits`, so chat users see an actionable message.
+402 semantics: when the billing account is allowance-managed, both the gate's
+pre-check and the reserve failure return `monthly_limit_reached` ("Monthly usage
+limit reached — resets next month") instead of `insufficient_credits`.
 
 ## 5. usage_logs attribution
 
 ```sql
-ALTER TABLE usage_logs ADD COLUMN account_id BIGINT REFERENCES accounts(id);  -- NULL = historical
-CREATE INDEX idx_usage_logs_account_created ON usage_logs(account_id, created_at);
+-- schema.sql re-runs in full on every boot: the ADD COLUMN is wrapped in the
+-- repo's duplicate_column guard and the index uses IF NOT EXISTS.
+DO $$ BEGIN
+    ALTER TABLE usage_logs ADD COLUMN account_id BIGINT REFERENCES accounts(id);  -- NULL = historical
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_usage_logs_account_created ON usage_logs(account_id, created_at);
 ```
 
 Written on every insert with the billing account. Analytics read
