@@ -93,11 +93,18 @@ jobs:
           # exist and prefix each with a `---` document separator so the stream
           # is valid multi-document YAML. A plain `cat` of the files concatenates
           # them into a single document (duplicate top-level keys, last wins) so
-          # kubectl applies only the final manifest. Then pin the freshly pushed
-          # image and wait for the rollout.
+          # kubectl applies only the final manifest.
+          #
+          # CRITICAL: the built image is substituted into the manifest BEFORE
+          # apply. The previous apply-then-set-image sequence briefly made the
+          # manifest's ":latest" the desired state; with IfNotPresent the node
+          # booted its STALE cached :latest (a pre-OSS build whose startup
+          # seeded the pricing catalog) for a few seconds on EVERY deploy —
+          # the "phantom pricing seeder" (2026-07 forensics). The desired
+          # image must never be a mutable tag at any point in the rollout.
           for f in deploy/k8s/*.yaml; do printf '%s\n' '---'; cat "$f"; done \
+            | sed "s|image: ghcr.io/skrx7392/local-ai-proxy:latest|image: ${IMAGE}|" \
             | $SSH "export KUBECONFIG=/home/sk/.kube/config && sudo kubectl apply -f -"
 
           $SSH "export KUBECONFIG=/home/sk/.kube/config && \
-            sudo kubectl -n local-ai set image deployment/ai-proxy ai-proxy='${IMAGE}' && \
             sudo kubectl -n local-ai rollout status deployment/ai-proxy --timeout=120s"

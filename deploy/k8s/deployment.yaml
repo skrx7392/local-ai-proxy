@@ -19,6 +19,11 @@ spec:
     spec:
       containers:
         - name: ai-proxy
+          # Placeholder ONLY — cd.yml substitutes the freshly built commit-SHA
+          # image before apply. A mutable :latest desired state + IfNotPresent
+          # boots whatever stale image the node has cached (this was the
+          # 2026-07 "phantom pricing seeder": every deploy briefly ran a
+          # pre-OSS cached build whose startup re-seeded the catalog).
           image: ghcr.io/skrx7392/local-ai-proxy:latest
           imagePullPolicy: IfNotPresent
           ports:
