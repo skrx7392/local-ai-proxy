@@ -320,3 +320,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_logs_account_created
 -- correlated per-account lookup; this index keeps that O(log n) per row.
 CREATE INDEX IF NOT EXISTS idx_federated_identities_account
     ON federated_identities(account_id, id);
+
+-- Same shape for the personal-account fallback in usage-by-account: the
+-- per-account owning-user email lookup filters users on account_id.
+CREATE INDEX IF NOT EXISTS idx_users_account
+    ON users(account_id, id);

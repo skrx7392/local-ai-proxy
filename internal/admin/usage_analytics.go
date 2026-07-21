@@ -47,6 +47,17 @@ type ownerUsageDTO struct {
 	KeyCount    int     `json:"key_count"`
 }
 
+type accountUsageDTO struct {
+	AccountID   *int64  `json:"account_id"`
+	AccountName *string `json:"account_name"`
+	AccountType *string `json:"account_type"`
+	Email       *string `json:"email"`
+	Requests    int     `json:"requests"`
+	TotalTokens int     `json:"total_tokens"`
+	Credits     float64 `json:"credits"`
+	KeyCount    int     `json:"key_count"`
+}
+
 type timeseriesBucketDTO struct {
 	Bucket           time.Time `json:"bucket"`
 	Requests         int       `json:"requests"`
@@ -325,6 +336,42 @@ func (h *handler) getUsageByUser(w http.ResponseWriter, r *http.Request) {
 			AccountID:   row.AccountID,
 			AccountName: row.AccountName,
 			AccountType: row.AccountType,
+			Requests:    row.Requests,
+			TotalTokens: row.TotalTokens,
+			Credits:     row.Credits,
+			KeyCount:    row.KeyCount,
+		}
+	}
+	page, pag := sliceWindow(dtos, limit, offset)
+	writeEnvelope(w, page, pag)
+}
+
+func (h *handler) getUsageByAccount(w http.ResponseWriter, r *http.Request) {
+	f, code, msg, err := parseUsageFilter(r, time.Now())
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, code, "invalid_request_error", msg)
+		return
+	}
+	limit, offset, pcode, pmsg, perr := parsePagination(r)
+	if perr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, pcode, "invalid_request_error", pmsg)
+		return
+	}
+
+	rows, err := h.store.GetUsageByAccount(f)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "usage by account error", "error", err)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get usage by account")
+		return
+	}
+
+	dtos := make([]accountUsageDTO, len(rows))
+	for i, row := range rows {
+		dtos[i] = accountUsageDTO{
+			AccountID:   row.AccountID,
+			AccountName: row.AccountName,
+			AccountType: row.AccountType,
+			Email:       row.Email,
 			Requests:    row.Requests,
 			TotalTokens: row.TotalTokens,
 			Credits:     row.Credits,

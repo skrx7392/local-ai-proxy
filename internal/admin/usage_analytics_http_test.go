@@ -45,6 +45,11 @@ func seedUsageFixtureHTTP(t *testing.T, s *store.Store) usageFixture {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
+	// Registration links user → personal account; CreateUser alone doesn't.
+	// Mirror that here so account→user lookups behave like production.
+	if _, err := s.Pool().Exec(ctx, `UPDATE users SET account_id = $1 WHERE id = $2`, personal, uid); err != nil {
+		t.Fatalf("link user to personal account: %v", err)
+	}
 	keyUser, err := s.CreateKeyForAccount(uid, personal, "alice-key", "hashU", "sk-u", 60)
 	if err != nil {
 		t.Fatalf("CreateKeyForAccount user: %v", err)
@@ -408,6 +413,159 @@ func TestUsageByUser_NodeFilter(t *testing.T) {
 	}
 }
 
+// --- by-account -----------------------------------------------------------
+
+// seedEndUserUsage extends the base fixture with the EUA population the
+// by-user grouping can't represent cleanly:
+//   - an end_user account with a federated identity, whose usage rides the
+//     SERVICE key (trusted-header attribution: usage_logs.account_id is the
+//     billing account, not the key's own account)
+//   - a key with no account at all (legacy admin key) → unattributed row.
+//
+// Returns (endUserAcct, orphanKey).
+func seedEndUserUsage(t *testing.T, s *store.Store, fx usageFixture) (int64, int64) {
+	t.Helper()
+	ctx := context.Background()
+
+	eu, err := s.CreateAccount("openwebui:u-777", "end_user")
+	if err != nil {
+		t.Fatalf("CreateAccount end_user: %v", err)
+	}
+	if _, err := s.Pool().Exec(ctx,
+		`INSERT INTO federated_identities (source, external_id, account_id, email, display_name)
+		 VALUES ('openwebui', 'u-777', $1, 'chat-user@example.com', 'Chat User')`, eu); err != nil {
+		t.Fatalf("insert federated identity: %v", err)
+	}
+
+	orphanKey, err := s.CreateKey("legacy-admin-key", "hashL", "sk-l", 60)
+	if err != nil {
+		t.Fatalf("CreateKey orphan: %v", err)
+	}
+
+	type row struct {
+		keyID  int64
+		acct   *int64
+		tokens int
+		credit float64
+		offset time.Duration
+	}
+	rows := []row{
+		{fx.keyService, &eu, 2000, 0.80, 3 * time.Hour},
+		{fx.keyService, &eu, 1000, 0.40, 4 * time.Hour},
+		{orphanKey, nil, 10, 0.01, 7 * time.Hour},
+	}
+	for _, r := range rows {
+		if _, err := s.Pool().Exec(ctx,
+			`INSERT INTO usage_logs (api_key_id, account_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at)
+			 VALUES ($1, $2, 'gemma4:e4b', $3, 0, $3, 100, 'completed', $4, $5)`,
+			r.keyID, r.acct, r.tokens, r.credit, fx.t0.Add(r.offset),
+		); err != nil {
+			t.Fatalf("insert eua usage: %v", err)
+		}
+	}
+	return eu, orphanKey
+}
+
+func TestUsageByAccount_GroupsByBillingAccount(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+	eu, _ := seedEndUserUsage(t, s, fx)
+
+	rec := doAdmin(t, h, "/api/admin/usage/by-account?since="+fx.t0.Format(time.RFC3339))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Data       []accountUsageDTO `json:"data"`
+		Pagination *Pagination       `json:"pagination"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Pagination == nil {
+		t.Fatalf("by-account must use the list envelope, body=%s", rec.Body.String())
+	}
+	// end_user (3000 tokens) > service (780) > personal (525) > unattributed (10)
+	if len(body.Data) != 4 {
+		t.Fatalf("len(data) = %d, want 4 accounts, body=%s", len(body.Data), rec.Body.String())
+	}
+
+	euRow := body.Data[0]
+	if euRow.AccountID == nil || *euRow.AccountID != eu {
+		t.Fatalf("first row account_id = %v, want end_user acct %d (ordered by tokens desc)", euRow.AccountID, eu)
+	}
+	if euRow.AccountType == nil || *euRow.AccountType != "end_user" {
+		t.Errorf("end_user row account_type = %v, want end_user", euRow.AccountType)
+	}
+	if euRow.Email == nil || *euRow.Email != "chat-user@example.com" {
+		t.Errorf("end_user row email = %v, want federated identity email", euRow.Email)
+	}
+	if euRow.Requests != 2 || euRow.TotalTokens != 3000 || euRow.KeyCount != 1 {
+		t.Errorf("end_user row = %+v, want 2 requests / 3000 tokens / 1 key", euRow)
+	}
+
+	svcRow := body.Data[1]
+	if svcRow.AccountID == nil || *svcRow.AccountID != fx.serviceAcct {
+		t.Errorf("second row account_id = %v, want service acct %d", svcRow.AccountID, fx.serviceAcct)
+	}
+	// The service key carried end-user traffic too, but those rows bill the
+	// end_user account: the service row must count ONLY unattributed key rows.
+	if svcRow.Requests != 2 || svcRow.TotalTokens != 780 {
+		t.Errorf("service row = %+v, want 2 requests / 780 tokens", svcRow)
+	}
+	if svcRow.Email != nil {
+		t.Errorf("service row email = %v, want nil", svcRow.Email)
+	}
+
+	personalRow := body.Data[2]
+	if personalRow.AccountID == nil || *personalRow.AccountID != fx.personalAcct {
+		t.Errorf("third row account_id = %v, want personal acct %d", personalRow.AccountID, fx.personalAcct)
+	}
+	if personalRow.AccountType == nil || *personalRow.AccountType != "personal" {
+		t.Errorf("personal row account_type = %v, want personal", personalRow.AccountType)
+	}
+	// Personal accounts fall back to the owning user's email for display.
+	if personalRow.Email == nil || *personalRow.Email != "alice@example.com" {
+		t.Errorf("personal row email = %v, want alice@example.com", personalRow.Email)
+	}
+
+	orphanRow := body.Data[3]
+	if orphanRow.AccountID != nil || orphanRow.AccountName != nil || orphanRow.AccountType != nil || orphanRow.Email != nil {
+		t.Errorf("unattributed row should be all-NULL identity, got %+v", orphanRow)
+	}
+	if orphanRow.Requests != 1 || orphanRow.TotalTokens != 10 {
+		t.Errorf("unattributed row = %+v, want 1 request / 10 tokens", orphanRow)
+	}
+}
+
+func TestUsageByAccount_AccountFilter(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+	eu, _ := seedEndUserUsage(t, s, fx)
+
+	path := fmt.Sprintf("/api/admin/usage/by-account?account_id=%d&since=%s", eu, fx.t0.Format(time.RFC3339))
+	rec := doAdmin(t, h, path)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data []accountUsageDTO `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Data) != 1 {
+		t.Fatalf("len(data) = %d, want just the filtered end_user account, body=%s", len(body.Data), rec.Body.String())
+	}
+	if body.Data[0].AccountID == nil || *body.Data[0].AccountID != eu {
+		t.Errorf("row account_id = %v, want %d", body.Data[0].AccountID, eu)
+	}
+	if body.Data[0].TotalTokens != 3000 {
+		t.Errorf("row tokens = %d, want 3000", body.Data[0].TotalTokens)
+	}
+}
+
 // --- timeseries -----------------------------------------------------------
 //
 // Timeseries is locked to the **detail envelope** shape per PLAN.md §Locked
@@ -607,6 +765,7 @@ func TestUsageEndpoints_ValidationErrors(t *testing.T) {
 		{"zero api_key_id", "/api/admin/usage/by-model?api_key_id=0"},
 		{"limit over cap", "/api/admin/usage/by-user?limit=501"},
 		{"negative offset", "/api/admin/usage/by-user?offset=-1"},
+		{"by-account limit over cap", "/api/admin/usage/by-account?limit=501"},
 		{"bad interval", "/api/admin/usage/timeseries?interval=fortnight"},
 	}
 	for _, c := range cases {
@@ -629,6 +788,7 @@ func TestUsageEndpoints_InvalidNodeID(t *testing.T) {
 		"/api/admin/usage/summary?node_id=abc",
 		"/api/admin/usage/by-model?node_id=abc",
 		"/api/admin/usage/by-user?node_id=abc",
+		"/api/admin/usage/by-account?node_id=abc",
 		"/api/admin/usage/timeseries?node_id=abc",
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -680,6 +840,7 @@ func TestUsageEndpoints_RequireAuth(t *testing.T) {
 		"/api/admin/usage/summary",
 		"/api/admin/usage/by-model",
 		"/api/admin/usage/by-user",
+		"/api/admin/usage/by-account",
 		"/api/admin/usage/timeseries",
 	} {
 		t.Run(path, func(t *testing.T) {
