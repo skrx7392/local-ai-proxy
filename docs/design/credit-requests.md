@@ -145,9 +145,12 @@ Extends `local-ai-chat/discord-approval-bot/` (same deployment):
 - Startup reconcile: `GET /api/admin/credit-requests?status=pending` → announce any
   request whose marker is absent from recent channel history.
 - New env/secrets: `PROXY_ADMIN_URL` (`http://ai-proxy.local-ai.svc.cluster.local`),
-  `PROXY_ADMIN_KEY` (a dedicated admin key minted for the bot, stored in a k8s
-  secret + the repo-external secrets dir, per convention). Admin rate limit
-  (10 req/min) is far above bot traffic.
+  `PROXY_ADMIN_KEY` in the bot's k8s secret. The proxy has a single admin key
+  (no scoped admin keys exist), so this is the proxy's ADMIN_KEY copied
+  secret-to-secret on the cluster — the bot pod already holds OpenWebUI admin
+  credentials, so its trust level is unchanged. Revisit with scoped admin keys
+  if a third consumer ever needs one. Admin rate limit (10 req/min) is far
+  above bot traffic.
 
 ## 6. Admin console (FE-3, folds in the FE-4 allowance-editor remainder)
 

@@ -53,6 +53,11 @@ spec:
                   optional: true
             - name: LOG_LEVEL
               value: "info"
+            # Cap-hit notifications → Discord bot (docs/design/credit-requests.md).
+            # Remove (or empty) to disable notifications; requests are still
+            # recorded in credit_requests either way.
+            - name: CREDIT_ALERT_WEBHOOK_URL
+              value: "http://openwebui-discord-bot.openwebui.svc.cluster.local:8080/credit-request"
           livenessProbe:
             httpGet:
               path: /api/healthz/live
