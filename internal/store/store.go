@@ -61,6 +61,7 @@ type APIKey struct {
 	AccountID         *int64     // nil = legacy key not on credit system
 	SessionTokenLimit *int       // nil = no session limit
 	LastUsedAt        *time.Time // nil = key has never served a request; derived from usage_logs
+	TrustUserHeaders  bool       // bill the forwarded end-user identity instead of the key's account
 }
 
 type Account struct {
@@ -81,6 +82,7 @@ type UsageEntry struct {
 	Status           string  // completed | partial | error
 	CreditsCharged   float64 // 0 when no hold/pricing was active
 	NodeID           *int64  // nil = request never resolved a node
+	AccountID        *int64  // billing account (end-user or key account); nil = legacy row
 }
 
 type UsageStat struct {
@@ -306,10 +308,10 @@ func (s *Store) GetKeyByHash(hash string) (*APIKey, error) {
 	var apiKey APIKey
 	err := s.pool.QueryRow(
 		context.Background(),
-		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit, trust_user_headers
 		 FROM api_keys WHERE key_hash = $1 AND revoked = FALSE`, hash,
 	).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &apiKey.Revoked,
-		&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit)
+		&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.TrustUserHeaders)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -328,7 +330,7 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
 		`SELECT k.id, k.name, k.key_prefix, k.rate_limit, k.created_at, k.revoked,
-		        k.user_id, k.account_id, k.session_token_limit, u.last_used_at
+		        k.user_id, k.account_id, k.session_token_limit, k.trust_user_headers, u.last_used_at
 		 FROM api_keys k
 		 LEFT JOIN (
 		     SELECT api_key_id, MAX(created_at) AS last_used_at
@@ -346,7 +348,7 @@ func (s *Store) ListKeys() ([]APIKey, error) {
 	for rows.Next() {
 		var apiKey APIKey
 		if err := rows.Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &apiKey.Revoked,
-			&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.LastUsedAt); err != nil {
+			&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.TrustUserHeaders, &apiKey.LastUsedAt); err != nil {
 			return nil, err
 		}
 		keys = append(keys, apiKey)
@@ -361,11 +363,11 @@ func (s *Store) GetKeyByID(id int64) (*APIKey, error) {
 	var apiKey APIKey
 	err := s.pool.QueryRow(
 		context.Background(),
-		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit,
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit, trust_user_headers,
 		        (SELECT MAX(created_at) FROM usage_logs WHERE api_key_id = api_keys.id)
 		 FROM api_keys WHERE id = $1`, id,
 	).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.RateLimit,
-		&apiKey.CreatedAt, &apiKey.Revoked, &apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.LastUsedAt)
+		&apiKey.CreatedAt, &apiKey.Revoked, &apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.TrustUserHeaders, &apiKey.LastUsedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -409,10 +411,10 @@ func (s *Store) RevokeKey(id int64) error {
 func (s *Store) LogUsage(entry UsageEntry) error {
 	_, err := s.pool.Exec(
 		context.Background(),
-		`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, node_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, node_id, account_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		entry.APIKeyID, entry.Model, entry.PromptTokens, entry.CompletionTokens,
-		entry.TotalTokens, entry.DurationMs, entry.Status, entry.CreditsCharged, entry.NodeID,
+		entry.TotalTokens, entry.DurationMs, entry.Status, entry.CreditsCharged, entry.NodeID, entry.AccountID,
 	)
 	return err
 }
@@ -789,7 +791,7 @@ func (s *Store) CreateKeyForUser(userID int64, name, keyHash, keyPrefix string, 
 func (s *Store) ListKeysByUser(userID int64) ([]APIKey, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
-		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit
+		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit, trust_user_headers
 		 FROM api_keys WHERE user_id = $1 ORDER BY id`, userID,
 	)
 	if err != nil {
@@ -801,7 +803,7 @@ func (s *Store) ListKeysByUser(userID int64) ([]APIKey, error) {
 	for rows.Next() {
 		var k APIKey
 		if err := rows.Scan(&k.ID, &k.Name, &k.KeyHash, &k.KeyPrefix, &k.RateLimit, &k.CreatedAt, &k.Revoked,
-			&k.UserID, &k.AccountID, &k.SessionTokenLimit); err != nil {
+			&k.UserID, &k.AccountID, &k.SessionTokenLimit, &k.TrustUserHeaders); err != nil {
 			return nil, err
 		}
 		keys = append(keys, k)

@@ -36,6 +36,7 @@ func setupTestStore(t *testing.T) *Store {
 		_, _ = s.pool.Exec(c, "DELETE FROM user_sessions")
 		_, _ = s.pool.Exec(c, "DELETE FROM api_keys")
 		_, _ = s.pool.Exec(c, "DELETE FROM users")
+		_, _ = s.pool.Exec(c, "DELETE FROM federated_identities")
 		_, _ = s.pool.Exec(c, "DELETE FROM accounts")
 	}
 
@@ -77,6 +78,7 @@ func TestNew(t *testing.T) {
 		_, _ = s.pool.Exec(c, "DELETE FROM user_sessions")
 		_, _ = s.pool.Exec(c, "DELETE FROM api_keys")
 		_, _ = s.pool.Exec(c, "DELETE FROM users")
+		_, _ = s.pool.Exec(c, "DELETE FROM federated_identities")
 		_, _ = s.pool.Exec(c, "DELETE FROM accounts")
 		s.Close()
 	})
