@@ -41,17 +41,17 @@ func adminGet(t *testing.T, h http.Handler, path string) *httptest.ResponseRecor
 }
 
 type creditRequestDTO struct {
-	ID                    int64    `json:"id"`
-	AccountID             int64    `json:"account_id"`
-	AccountName           string   `json:"account_name"`
-	Email                 *string  `json:"email"`
-	Period                string   `json:"period"`
-	Status                string   `json:"status"`
-	CreatedAt             string   `json:"created_at"`
-	ResolvedAt            *string  `json:"resolved_at"`
-	ResolvedNote          *string  `json:"resolved_note"`
-	EffectiveMonthlyGrant float64  `json:"effective_monthly_grant"`
-	Balance               float64  `json:"balance"`
+	ID                    int64   `json:"id"`
+	AccountID             int64   `json:"account_id"`
+	AccountName           string  `json:"account_name"`
+	Email                 *string `json:"email"`
+	Period                string  `json:"period"`
+	Status                string  `json:"status"`
+	CreatedAt             string  `json:"created_at"`
+	ResolvedAt            *string `json:"resolved_at"`
+	ResolvedNote          *string `json:"resolved_note"`
+	EffectiveMonthlyGrant float64 `json:"effective_monthly_grant"`
+	Balance               float64 `json:"balance"`
 }
 
 func decodeCreditRequestList(t *testing.T, rec *httptest.ResponseRecorder) ([]creditRequestDTO, *Pagination) {
