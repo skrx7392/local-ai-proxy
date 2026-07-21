@@ -581,17 +581,31 @@ func (s *Store) SetSessionTokenLimit(keyID int64, limit *int) error {
 }
 
 // ListAccountsWithBalances returns all accounts with their credit balances.
-func (s *Store) ListAccountsWithBalances() ([]struct {
+// AccountWithBalance is one row of the admin accounts listing: the account,
+// its balance state, and — for allowance-managed end-user accounts — the
+// allowance override and the federated identity's email (oldest identity
+// wins on the rare account with several).
+type AccountWithBalance struct {
 	Account
-	Balance  float64
-	Reserved float64
-}, error) {
+	Balance          float64
+	Reserved         float64
+	AllowanceManaged bool
+	MonthlyGrant     *float64 // nil = env default applies
+	FederatedEmail   *string  // nil = no federated identity
+}
+
+func (s *Store) ListAccountsWithBalances() ([]AccountWithBalance, error) {
 	rows, err := s.pool.Query(
 		context.Background(),
 		`SELECT a.id, a.name, a.type, a.is_active, a.created_at,
-		        COALESCE(cb.balance, 0), COALESCE(cb.reserved, 0)
+		        COALESCE(cb.balance, 0), COALESCE(cb.reserved, 0),
+		        a.allowance_managed, a.monthly_grant, fi.email
 		 FROM accounts a
 		 LEFT JOIN credit_balances cb ON cb.account_id = a.id
+		 LEFT JOIN LATERAL (
+		     SELECT email FROM federated_identities
+		     WHERE account_id = a.id ORDER BY id LIMIT 1
+		 ) fi ON TRUE
 		 ORDER BY a.id`,
 	)
 	if err != nil {
@@ -599,24 +613,11 @@ func (s *Store) ListAccountsWithBalances() ([]struct {
 	}
 	defer rows.Close()
 
-	type AccountWithBalance struct {
-		Account
-		Balance  float64
-		Reserved float64
-	}
-	var results []struct {
-		Account
-		Balance  float64
-		Reserved float64
-	}
+	var results []AccountWithBalance
 	for rows.Next() {
-		var r struct {
-			Account
-			Balance  float64
-			Reserved float64
-		}
+		var r AccountWithBalance
 		if err := rows.Scan(&r.ID, &r.Name, &r.Type, &r.IsActive, &r.CreatedAt,
-			&r.Balance, &r.Reserved); err != nil {
+			&r.Balance, &r.Reserved, &r.AllowanceManaged, &r.MonthlyGrant, &r.FederatedEmail); err != nil {
 			return nil, err
 		}
 		results = append(results, r)

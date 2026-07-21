@@ -20,6 +20,7 @@ import (
 
 	"github.com/krishna/local-ai-proxy/internal/apierror"
 	"github.com/krishna/local-ai-proxy/internal/auth"
+	"github.com/krishna/local-ai-proxy/internal/billing"
 	"github.com/krishna/local-ai-proxy/internal/credits"
 	"github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/registry"
@@ -198,6 +199,18 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	start := time.Now()
 	key := auth.KeyFromContext(r.Context())
 
+	// Billing account: the resolution attached by the billing middleware
+	// (end-user account on trusted keys) when present, else the key's own
+	// account. Reserve, settle, usage stats, and the usage row all follow it.
+	var bill billingInfo
+	if key != nil {
+		bill.AccountID = key.AccountID
+	}
+	if res, ok := billing.FromContext(r.Context()); ok {
+		id := res.AccountID
+		bill = billingInfo{AccountID: &id, AllowanceManaged: res.AllowanceManaged}
+	}
+
 	// Read and peek at request body
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxBody)
 	body, err := io.ReadAll(r.Body)
@@ -222,9 +235,9 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// --- Credit enforcement (only for keys with AccountID) ---
+	// --- Credit enforcement (only for keys with a billing account) ---
 	var pricing *store.CreditPricing
-	creditEnabled := key != nil && key.AccountID != nil && h.db != nil
+	creditEnabled := key != nil && bill.AccountID != nil && h.db != nil
 
 	if creditEnabled {
 		// (2) Model allowlist: reject unpriced models
@@ -247,9 +260,9 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				maxTokens = meta.MaxCompletionTokens
 			}
 			estimatedPrompt := credits.EstimatePromptTokens(len(body))
-			stats, statsErr := h.db.GetAccountUsageStats(*key.AccountID, meta.Model)
+			stats, statsErr := h.db.GetAccountUsageStats(*bill.AccountID, meta.Model)
 			if statsErr != nil {
-				slog.WarnContext(r.Context(), "session usage stats lookup error", "error", statsErr, "account_id", *key.AccountID, "model", meta.Model)
+				slog.WarnContext(r.Context(), "session usage stats lookup error", "error", statsErr, "account_id", *bill.AccountID, "model", meta.Model)
 			}
 			estimatedCompletion := credits.EstimateCompletionTokens(maxTokens, stats, pricing)
 			estimatedTotal := estimatedPrompt + estimatedCompletion
@@ -296,15 +309,20 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 			maxTok = meta.MaxCompletionTokens
 		}
 		promptEst := credits.EstimatePromptTokens(len(body))
-		stats, statsErr := h.db.GetAccountUsageStats(*key.AccountID, meta.Model)
+		stats, statsErr := h.db.GetAccountUsageStats(*bill.AccountID, meta.Model)
 		if statsErr != nil {
-			slog.WarnContext(r.Context(), "usage stats lookup error", "error", statsErr, "account_id", *key.AccountID, "model", meta.Model)
+			slog.WarnContext(r.Context(), "usage stats lookup error", "error", statsErr, "account_id", *bill.AccountID, "model", meta.Model)
 		}
 		completionEst := credits.EstimateCompletionTokens(maxTok, stats, pricing)
 		reserveAmount := credits.EstimateCost(pricing, promptEst, completionEst)
 
-		holdID, err = h.db.ReserveCredits(*key.AccountID, reserveAmount)
+		holdID, err = h.db.ReserveCredits(*bill.AccountID, reserveAmount)
 		if err != nil {
+			if bill.AllowanceManaged {
+				writeError(w, r, http.StatusPaymentRequired, "monthly_limit_reached", "invalid_request_error",
+					"Monthly usage limit reached — resets next month")
+				return
+			}
 			writeError(w, r, http.StatusPaymentRequired, "insufficient_credits", "invalid_request_error",
 				"Insufficient credits for this request")
 			return
@@ -314,10 +332,18 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// (5) Forward
 	isStream := meta.Stream != nil && *meta.Stream
 	if isStream {
-		h.handleStreaming(w, r, body, meta.Model, node, key, start, holdID, creditEnabled, pricing)
+		h.handleStreaming(w, r, body, meta.Model, node, key, bill, start, holdID, creditEnabled, pricing)
 	} else {
-		h.handleNonStreaming(w, r, body, meta.Model, node, key, start, holdID, creditEnabled, pricing)
+		h.handleNonStreaming(w, r, body, meta.Model, node, key, bill, start, holdID, creditEnabled, pricing)
 	}
+}
+
+// billingInfo carries the resolved billing account through the request flow.
+// AccountID nil = credit-disabled path (no db or misprovisioned key —
+// creditEnabled is false and no holds are taken).
+type billingInfo struct {
+	AccountID        *int64
+	AllowanceManaged bool
 }
 
 // newUpstreamRequest builds the forwarded request for a node: the chat path
@@ -358,7 +384,7 @@ func copyResponseHeaders(dst, src http.Header) {
 }
 
 func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, body []byte,
-	model string, node registry.Node, key *store.APIKey, start time.Time,
+	model string, node registry.Node, key *store.APIKey, bill billingInfo, start time.Time,
 	holdID int64, creditEnabled bool, pricing *store.CreditPricing) {
 
 	nodeID := node.ID
@@ -382,13 +408,13 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 		// timeout — which still owes the client a 502.
 		if r.Context().Err() != nil {
 			if key != nil {
-				h.logUsage(key, usageData{Model: model}, time.Since(start), "partial", 0, &nodeID)
+				h.logUsage(key, bill, usageData{Model: model}, time.Since(start), "partial", 0, &nodeID)
 			}
 			return
 		}
 		slog.ErrorContext(r.Context(), "upstream error", "error", err, "model", model, "node", node.Name)
 		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error", 0, &nodeID)
+			h.logUsage(key, bill, usageData{Model: model}, time.Since(start), "error", 0, &nodeID)
 		}
 		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
 		return
@@ -404,7 +430,7 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 		}
 		slog.ErrorContext(r.Context(), "read response error", "error", err, "model", model, "node", node.Name)
 		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error", 0, &nodeID)
+			h.logUsage(key, bill, usageData{Model: model}, time.Since(start), "error", 0, &nodeID)
 		}
 		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to read upstream response")
 		return
@@ -427,13 +453,13 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 			// Upstream error — release hold, no charge
 			h.db.ReleaseHold(holdID)
 		} else {
-			actualCost = h.settleCredits(holdID, key, &ud, len(respBody), pricing)
+			actualCost = h.settleCredits(holdID, bill, &ud, len(respBody), pricing)
 		}
 	}
 
 	// Log usage and record metrics
 	if key != nil {
-		h.logUsage(key, ud, time.Since(start), status, actualCost, &nodeID)
+		h.logUsage(key, bill, ud, time.Since(start), status, actualCost, &nodeID)
 	}
 	h.metrics.RecordTokens(model, node.Name, ud.Usage.PromptTokens, ud.Usage.CompletionTokens)
 
@@ -445,7 +471,7 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 }
 
 func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body []byte,
-	model string, node registry.Node, key *store.APIKey, start time.Time,
+	model string, node registry.Node, key *store.APIKey, bill billingInfo, start time.Time,
 	holdID int64, creditEnabled bool, pricing *store.CreditPricing) {
 
 	nodeID := node.ID
@@ -475,13 +501,13 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 		}
 		if r.Context().Err() != nil {
 			if key != nil {
-				h.logUsage(key, usageData{Model: model}, time.Since(start), "partial", 0, &nodeID)
+				h.logUsage(key, bill, usageData{Model: model}, time.Since(start), "partial", 0, &nodeID)
 			}
 			return
 		}
 		slog.ErrorContext(r.Context(), "upstream error", "error", err, "model", model, "node", node.Name, "stream", true)
 		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error", 0, &nodeID)
+			h.logUsage(key, bill, usageData{Model: model}, time.Since(start), "error", 0, &nodeID)
 		}
 		writeError(w, r, http.StatusBadGateway, "upstream_error", "server_error", "Failed to connect to upstream model server")
 		return
@@ -500,7 +526,7 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 			h.db.ReleaseHold(holdID)
 		}
 		if key != nil {
-			h.logUsage(key, usageData{Model: model}, time.Since(start), "error", 0, &nodeID)
+			h.logUsage(key, bill, usageData{Model: model}, time.Since(start), "error", 0, &nodeID)
 		}
 		return
 	}
@@ -558,11 +584,11 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 	// Credit settlement
 	var actualCost float64
 	if creditEnabled {
-		actualCost = h.settleStreamCredits(holdID, key, &ud, bytesWritten, status, pricing)
+		actualCost = h.settleStreamCredits(holdID, bill, &ud, bytesWritten, status, pricing)
 	}
 
 	if key != nil {
-		h.logUsage(key, ud, time.Since(start), status, actualCost, &nodeID)
+		h.logUsage(key, bill, ud, time.Since(start), status, actualCost, &nodeID)
 	}
 	h.metrics.RecordTokens(model, node.Name, ud.Usage.PromptTokens, ud.Usage.CompletionTokens)
 }
@@ -571,7 +597,7 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 // returns the amount actually charged (0 when the hold had already been
 // released by the sweeper). Called only for successful (200) upstream
 // responses.
-func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, respBodyLen int, pricing *store.CreditPricing) float64 {
+func (h *handler) settleCredits(holdID int64, bill billingInfo, ud *usageData, respBodyLen int, pricing *store.CreditPricing) float64 {
 	promptTokens := ud.Usage.PromptTokens
 	completionTokens := ud.Usage.CompletionTokens
 
@@ -588,9 +614,9 @@ func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, 
 	}
 
 	// Update usage stats for future estimates
-	if key != nil && key.AccountID != nil && completionTokens > 0 {
-		if err := h.db.UpdateAccountUsageStats(*key.AccountID, ud.Model, completionTokens); err != nil {
-			slog.Warn("update usage stats error", "error", err, "account_id", *key.AccountID, "model", ud.Model)
+	if bill.AccountID != nil && completionTokens > 0 {
+		if err := h.db.UpdateAccountUsageStats(*bill.AccountID, ud.Model, completionTokens); err != nil {
+			slog.Warn("update usage stats error", "error", err, "account_id", *bill.AccountID, "model", ud.Model)
 		}
 	}
 	return charged
@@ -598,7 +624,7 @@ func (h *handler) settleCredits(holdID int64, key *store.APIKey, ud *usageData, 
 
 // settleStreamCredits handles credit settlement for streaming responses and
 // returns the amount actually charged.
-func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usageData, bytesWritten int, status string, pricing *store.CreditPricing) float64 {
+func (h *handler) settleStreamCredits(holdID int64, bill billingInfo, ud *usageData, bytesWritten int, status string, pricing *store.CreditPricing) float64 {
 	if status == "error" && bytesWritten == 0 {
 		h.db.ReleaseHold(holdID)
 		return 0
@@ -619,9 +645,9 @@ func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usage
 		slog.Error("settle hold error", "error", err, "hold_id", holdID, "stream", true)
 	}
 
-	if key != nil && key.AccountID != nil && completionTokens > 0 {
-		if err := h.db.UpdateAccountUsageStats(*key.AccountID, ud.Model, completionTokens); err != nil {
-			slog.Warn("update usage stats error", "error", err, "account_id", *key.AccountID, "model", ud.Model)
+	if bill.AccountID != nil && completionTokens > 0 {
+		if err := h.db.UpdateAccountUsageStats(*bill.AccountID, ud.Model, completionTokens); err != nil {
+			slog.Warn("update usage stats error", "error", err, "account_id", *bill.AccountID, "model", ud.Model)
 		}
 	}
 	return charged
@@ -629,7 +655,7 @@ func (h *handler) settleStreamCredits(holdID int64, key *store.APIKey, ud *usage
 
 // logUsage queues one usage entry. nodeID attributes the entry to the node
 // that served the request; requests that never resolved a node pass nil.
-func (h *handler) logUsage(key *store.APIKey, ud usageData, duration time.Duration, status string, creditsCharged float64, nodeID *int64) {
+func (h *handler) logUsage(key *store.APIKey, bill billingInfo, ud usageData, duration time.Duration, status string, creditsCharged float64, nodeID *int64) {
 	if key == nil {
 		return
 	}
@@ -643,6 +669,7 @@ func (h *handler) logUsage(key *store.APIKey, ud usageData, duration time.Durati
 		Status:           status,
 		CreditsCharged:   creditsCharged,
 		NodeID:           nodeID,
+		AccountID:        bill.AccountID,
 	}
 	select {
 	case h.usageCh <- entry:

@@ -38,6 +38,7 @@ func setupTestStore(t *testing.T) *store.Store {
 		_, _ = pool.Exec(c, "DELETE FROM user_sessions")
 		_, _ = pool.Exec(c, "DELETE FROM api_keys")
 		_, _ = pool.Exec(c, "DELETE FROM users")
+		_, _ = pool.Exec(c, "DELETE FROM federated_identities")
 		_, _ = pool.Exec(c, "DELETE FROM accounts")
 	}
 	wipe()

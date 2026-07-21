@@ -42,6 +42,7 @@ func setupGuardedUserTest(t *testing.T, cfg authlimit.Config) (http.Handler, *au
 		_, _ = s.Pool().Exec(c, "DELETE FROM user_sessions")
 		_, _ = s.Pool().Exec(c, "DELETE FROM api_keys")
 		_, _ = s.Pool().Exec(c, "DELETE FROM users")
+		_, _ = s.Pool().Exec(c, "DELETE FROM federated_identities")
 		_, _ = s.Pool().Exec(c, "DELETE FROM accounts")
 	}
 	wipe()

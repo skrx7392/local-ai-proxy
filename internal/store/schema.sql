@@ -315,3 +315,8 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS idx_usage_logs_account_created
     ON usage_logs(account_id, created_at);
+
+-- The admin accounts listing resolves each account's display email via a
+-- correlated per-account lookup; this index keeps that O(log n) per row.
+CREATE INDEX IF NOT EXISTS idx_federated_identities_account
+    ON federated_identities(account_id, id);

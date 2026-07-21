@@ -76,6 +76,7 @@ Readiness = DB ok **and** usage writer ok **and** (*zero enabled nodes* **or** *
 | `GET` | `/api/admin/keys/{id}` | Key detail |
 | `PUT` | `/api/admin/keys/{id}/rate-limit` | Update a key's rate limit |
 | `PUT` | `/api/admin/keys/{id}/session-limit` | Set/clear a key's session token limit |
+| `PUT` | `/api/admin/keys/{id}/trust-user-headers` | Trust forwarded end-user identity headers on this key (`{trust_user_headers: bool}`) — requests then bill auto-provisioned per-user accounts (see docs/design/end-user-accounts.md) |
 | `DELETE` | `/api/admin/keys/{id}` | Revoke (soft-delete) a key |
 | `GET` | `/api/admin/usage` | Aggregated usage stats (filterable by `key_id`, `since`, and `node_id`) |
 | `GET` | `/api/admin/usage/summary` \| `/by-model` \| `/by-user` \| `/timeseries` | Usage analytics |
@@ -85,6 +86,7 @@ Readiness = DB ok **and** usage writer ok **and** (*zero enabled nodes* **or** *
 | `GET` | `/api/admin/accounts` | List accounts (credit balances) |
 | `POST` | `/api/admin/accounts/{id}/credits` | Grant credits |
 | `POST` | `/api/admin/accounts/{id}/keys` | Create a key bound to an account |
+| `PUT` | `/api/admin/accounts/{id}/allowance` | Set (`{monthly_grant: 12.5}`) or clear (`{monthly_grant: null}` → env default) an end-user account's monthly allowance override |
 | `GET`/`POST` | `/api/admin/pricing` | List / upsert model pricing (`{model_id, prompt_rate_per_mtok, completion_rate_per_mtok, typical_completion}`) |
 | `DELETE` | `/api/admin/pricing/{id}` | Deactivate pricing |
 | `GET`/`POST`/`DELETE` | `/api/admin/registration-tokens` | Manage service-registration tokens |
@@ -276,6 +278,7 @@ All configuration via environment variables:
 | `ADMIN_BOOTSTRAP_TOKEN` | *(none)* | Enables `POST /api/admin/bootstrap` (one-time first-admin creation) when set |
 | `DEFAULT_CREDIT_GRANT` | `0` | Credits granted to newly registered accounts |
 | `ADMIN_SERVICE_CREDIT_GRANT` | `1000000` | One-time starting balance for the auto-created `admin-service` account (applied at creation only — top up later via `POST /api/admin/accounts/{id}/credits`; must be >= 0) |
+| `END_USER_MONTHLY_GRANT` | `5.0` | Monthly allowance (reset-to-grant, no rollover) for auto-provisioned end-user accounts on trusted keys; per-account override via `PUT /api/admin/accounts/{id}/allowance`; must be >= 0 |
 | `PORT` | `8080` | Server listen port |
 | `CORS_ORIGINS` | `*` | Allowed CORS origins |
 | `MAX_REQUEST_BODY` | `52428800` (50MB) | Max request body size in bytes (chat proxy path); also caps upstream non-streaming/error response reads |

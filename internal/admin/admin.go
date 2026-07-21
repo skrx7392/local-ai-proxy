@@ -135,7 +135,8 @@ type keyResponse struct {
 	// LastUsedAt is the most recent request time derived from usage_logs,
 	// RFC3339-formatted. nil (JSON null) means the key has never served a
 	// request — the FE renders that as "Never".
-	LastUsedAt *string `json:"last_used_at"`
+	LastUsedAt       *string `json:"last_used_at"`
+	TrustUserHeaders bool    `json:"trust_user_headers"`
 }
 
 func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.UsageEntry, opts Options) http.Handler {
@@ -182,6 +183,7 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	mux.HandleFunc("GET /api/admin/accounts", handler.listAccounts)
 	mux.HandleFunc("POST /api/admin/accounts/{id}/credits", handler.grantCredits)
 	mux.HandleFunc("POST /api/admin/accounts/{id}/keys", handler.createAccountKey)
+	mux.HandleFunc("PUT /api/admin/accounts/{id}/allowance", handler.setAccountAllowance)
 
 	// Registration tokens
 	mux.HandleFunc("POST /api/admin/registration-tokens", handler.createRegistrationToken)
@@ -195,6 +197,7 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 
 	// Session limits
 	mux.HandleFunc("PUT /api/admin/keys/{id}/session-limit", handler.setSessionLimit)
+	mux.HandleFunc("PUT /api/admin/keys/{id}/trust-user-headers", handler.setTrustUserHeaders)
 
 	// Config + health (BE 5)
 	mux.HandleFunc("GET /api/admin/config", handler.getConfig)
@@ -419,13 +422,14 @@ func (h *handler) listKeys(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		resp = append(resp, keyResponse{
-			ID:         apiKey.ID,
-			Name:       apiKey.Name,
-			KeyPrefix:  apiKey.KeyPrefix,
-			RateLimit:  apiKey.RateLimit,
-			CreatedAt:  apiKey.CreatedAt,
-			Revoked:    apiKey.Revoked,
-			LastUsedAt: formatRFC3339Ptr(apiKey.LastUsedAt),
+			ID:               apiKey.ID,
+			Name:             apiKey.Name,
+			KeyPrefix:        apiKey.KeyPrefix,
+			RateLimit:        apiKey.RateLimit,
+			CreatedAt:        apiKey.CreatedAt,
+			Revoked:          apiKey.Revoked,
+			LastUsedAt:       formatRFC3339Ptr(apiKey.LastUsedAt),
+			TrustUserHeaders: apiKey.TrustUserHeaders,
 		})
 	}
 
@@ -672,14 +676,17 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type accountResponse struct {
-		ID        int64   `json:"id"`
-		Name      string  `json:"name"`
-		Type      string  `json:"type"`
-		IsActive  bool    `json:"is_active"`
-		Balance   float64 `json:"balance"`
-		Reserved  float64 `json:"reserved"`
-		Available float64 `json:"available"`
-		CreatedAt string  `json:"created_at"`
+		ID               int64    `json:"id"`
+		Name             string   `json:"name"`
+		Type             string   `json:"type"`
+		IsActive         bool     `json:"is_active"`
+		Balance          float64  `json:"balance"`
+		Reserved         float64  `json:"reserved"`
+		Available        float64  `json:"available"`
+		CreatedAt        string   `json:"created_at"`
+		AllowanceManaged bool     `json:"allowance_managed"`
+		MonthlyGrant     *float64 `json:"monthly_grant"`
+		Email            *string  `json:"email"`
 	}
 
 	resp := make([]accountResponse, 0, len(accounts))
@@ -691,14 +698,17 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		resp = append(resp, accountResponse{
-			ID:        a.ID,
-			Name:      a.Name,
-			Type:      a.Type,
-			IsActive:  a.IsActive,
-			Balance:   a.Balance,
-			Reserved:  a.Reserved,
-			Available: a.Balance - a.Reserved,
-			CreatedAt: a.CreatedAt.Format(time.RFC3339),
+			ID:               a.ID,
+			Name:             a.Name,
+			Type:             a.Type,
+			IsActive:         a.IsActive,
+			Balance:          a.Balance,
+			Reserved:         a.Reserved,
+			Available:        a.Balance - a.Reserved,
+			CreatedAt:        a.CreatedAt.Format(time.RFC3339),
+			AllowanceManaged: a.AllowanceManaged,
+			MonthlyGrant:     a.MonthlyGrant,
+			Email:            a.FederatedEmail,
 		})
 	}
 
@@ -1065,6 +1075,88 @@ func (h *handler) setSessionLimit(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"status": "updated", "limit": req.Limit})
 }
 
+// setTrustUserHeaders flips identity-header trust on a key
+// (docs/design/end-user-accounts.md §1). The field is required — an absent
+// value is a 400, never an implicit false.
+func (h *handler) setTrustUserHeaders(w http.ResponseWriter, r *http.Request) {
+	keyID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid key ID")
+		return
+	}
+
+	var req struct {
+		Trust *bool `json:"trust_user_headers"`
+	}
+	if !apierror.DecodeJSON(w, r, &req) {
+		return
+	}
+	if req.Trust == nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_field", "invalid_request_error", "trust_user_headers is required")
+		return
+	}
+
+	if err := h.store.SetTrustUserHeaders(keyID, *req.Trust); err != nil {
+		if err == store.ErrKeyNotFound {
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Key not found")
+			return
+		}
+		slog.ErrorContext(r.Context(), "set trust user headers error", "error", err, "key_id", keyID)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to set trust flag")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "updated", "trust_user_headers": *req.Trust})
+}
+
+// setAccountAllowance sets (value) or clears (null → env default) an
+// account's monthly allowance override. Takes effect at the next monthly
+// reset (docs/design/end-user-accounts.md §3).
+func (h *handler) setAccountAllowance(w http.ResponseWriter, r *http.Request) {
+	accountID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid account ID")
+		return
+	}
+
+	// json.RawMessage distinguishes an ABSENT field from explicit null:
+	// null is the destructive "clear the override" operation, so it must be
+	// spelled out — {} is a 400, never a silent clear.
+	var req struct {
+		MonthlyGrant json.RawMessage `json:"monthly_grant"`
+	}
+	if !apierror.DecodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.MonthlyGrant) == 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_field", "invalid_request_error", "monthly_grant is required (number to set, null to clear)")
+		return
+	}
+	var grant *float64
+	if err := json.Unmarshal(req.MonthlyGrant, &grant); err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_amount", "invalid_request_error", "monthly_grant must be a number or null")
+		return
+	}
+	if grant != nil && *grant < 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_amount", "invalid_request_error", "monthly_grant must be >= 0")
+		return
+	}
+
+	if err := h.store.SetMonthlyGrant(accountID, grant); err != nil {
+		if err.Error() == "account not found" {
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Account not found")
+			return
+		}
+		slog.ErrorContext(r.Context(), "set monthly grant error", "error", err, "account_id", accountID)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to set allowance")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "updated", "monthly_grant": grant})
+}
+
 func min(a, b float64) float64 {
 	if a < b {
 		return a
@@ -1171,6 +1263,7 @@ type keyDetailDTO struct {
 	SessionTokenLimit *int    `json:"session_token_limit"`
 	CreatedAt         string  `json:"created_at"`
 	LastUsedAt        *string `json:"last_used_at"`
+	TrustUserHeaders  bool    `json:"trust_user_headers"`
 }
 
 func toKeyDetailDTO(k *store.APIKey) keyDetailDTO {
@@ -1185,6 +1278,7 @@ func toKeyDetailDTO(k *store.APIKey) keyDetailDTO {
 		SessionTokenLimit: k.SessionTokenLimit,
 		CreatedAt:         k.CreatedAt.Format(time.RFC3339),
 		LastUsedAt:        formatRFC3339Ptr(k.LastUsedAt),
+		TrustUserHeaders:  k.TrustUserHeaders,
 	}
 }
 
