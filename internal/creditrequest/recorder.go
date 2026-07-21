@@ -46,7 +46,7 @@ type Recorder struct {
 	client       *http.Client
 
 	wg  sync.WaitGroup
-	sem chan struct{} // caps concurrent recordings under 402 storms
+	sem chan struct{} // caps concurrent webhook deliveries (never the filing)
 }
 
 // New builds a Recorder. webhookURL may be empty (requests are still
@@ -63,23 +63,18 @@ func New(db *store.Store, webhookURL string, defaultGrant float64) *Recorder {
 }
 
 // RecordCapHit files a credit request for the account (deduped per month)
-// and fires the webhook when this call was the one that filed it. Async and
-// non-blocking: under a saturated semaphore the event is skipped — the next
-// 402 from the still-capped account retries the filing.
+// and fires the webhook when this call was the one that filed it. Async so
+// the 402 response never waits. The filing itself always runs — one fast
+// indexed insert, the same load profile as the 402 handling that triggered
+// it — so slow webhook deliveries can never cause a cap-hit to go
+// unrecorded; only delivery is concurrency-capped.
 func (r *Recorder) RecordCapHit(accountID int64) {
 	if r == nil {
-		return
-	}
-	select {
-	case r.sem <- struct{}{}:
-	default:
-		slog.Debug("cap-hit recording skipped (saturated)", "account_id", accountID)
 		return
 	}
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		defer func() { <-r.sem }()
 		r.recordCapHit(accountID)
 	}()
 }
@@ -129,6 +124,10 @@ func (r *Recorder) recordCapHit(accountID int64) {
 	if info.DisplayName != nil {
 		n.DisplayName = *info.DisplayName
 	}
+	// Blocking acquire is safe here: only filing winners reach delivery, and
+	// there is at most one winner per account per month.
+	r.sem <- struct{}{}
+	defer func() { <-r.sem }()
 	if err := r.deliver(n); err != nil {
 		// The bot reconciles pending requests on startup and the admin
 		// console lists them, so a lost notification self-heals.

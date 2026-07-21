@@ -56,7 +56,7 @@ func TestCreditGate_AllowanceCapHit_FilesCreditRequest(t *testing.T) {
 	_ = do()
 	rec.Wait()
 
-	rows, err := db.ListCreditRequests("pending")
+	rows, err := db.ListCreditRequests("pending", time.Now())
 	if err != nil {
 		t.Fatalf("ListCreditRequests: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestCreditGate_NonAllowance402_DoesNotFile(t *testing.T) {
 	}
 	rec.Wait()
 
-	rows, err := db.ListCreditRequests("pending")
+	rows, err := db.ListCreditRequests("pending", time.Now())
 	if err != nil {
 		t.Fatalf("ListCreditRequests: %v", err)
 	}

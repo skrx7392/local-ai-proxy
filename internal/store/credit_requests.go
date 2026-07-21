@@ -18,6 +18,10 @@ var (
 	ErrCreditRequestNotFound = errors.New("credit request not found")
 	// ErrCreditRequestResolved: the request was already granted or dismissed.
 	ErrCreditRequestResolved = errors.New("credit request already resolved")
+	// ErrCreditRequestExpired: the request's allowance period is over — the
+	// balance has since reset, so acting on it would grant against the
+	// wrong month.
+	ErrCreditRequestExpired = errors.New("credit request expired")
 )
 
 // CreditRequest is one cap-hit record.
@@ -80,10 +84,31 @@ func (s *Store) FileCreditRequest(accountID int64, now time.Time) (int64, bool, 
 	return id, true, nil
 }
 
+// expireStaleCreditRequests lazily expires pending rows from past months:
+// once the allowance has reset, granting against the old request would be a
+// double grant, so it must stop being actionable. Same no-cron pattern as
+// the monthly allowance top-up.
+func (s *Store) expireStaleCreditRequests(ctx context.Context, now time.Time) error {
+	month := time.Date(now.UTC().Year(), now.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	_, err := s.pool.Exec(ctx,
+		`UPDATE credit_requests
+		 SET status = 'expired', resolved_at = NOW(), resolved_note = 'expired at month rollover'
+		 WHERE status = 'pending' AND period < $1`,
+		month,
+	)
+	return err
+}
+
 // ListCreditRequests returns requests with the given status, newest first,
-// joined with account display data for the admin listing.
-func (s *Store) ListCreditRequests(status string) ([]CreditRequestRow, error) {
-	rows, err := s.pool.Query(context.Background(),
+// joined with account display data for the admin listing. Pending rows from
+// past months are expired first, so the pending view only ever shows
+// actionable requests. now is injected for testability.
+func (s *Store) ListCreditRequests(status string, now time.Time) ([]CreditRequestRow, error) {
+	ctx := context.Background()
+	if err := s.expireStaleCreditRequests(ctx, now); err != nil {
+		return nil, fmt.Errorf("expire stale credit requests: %w", err)
+	}
+	rows, err := s.pool.Query(ctx,
 		`SELECT cr.id, cr.account_id, cr.period, cr.status, cr.created_at,
 		        cr.resolved_at, cr.resolved_note,
 		        a.name, fi.email, a.monthly_grant, COALESCE(cb.balance, 0)
@@ -116,15 +141,20 @@ func (s *Store) ListCreditRequests(status string) ([]CreditRequestRow, error) {
 	return out, rows.Err()
 }
 
-// ResolveCreditRequest moves a pending request to granted or dismissed.
-// Resolution never moves money itself — callers grant credits through the
-// audited grant path first, then mark the request.
-func (s *Store) ResolveCreditRequest(id int64, status, note string) error {
-	ct, err := s.pool.Exec(context.Background(),
+// ResolveCreditRequest moves a pending request of the CURRENT month to
+// granted or dismissed. Stale pending rows (period already rolled over) are
+// expired instead of resolved — the allowance has reset, so acting on them
+// would grant against the wrong month. Resolution never moves money itself;
+// callers mark the request first (this row is the idempotency lock) and then
+// grant through the audited grant path.
+func (s *Store) ResolveCreditRequest(id int64, status, note string, now time.Time) error {
+	ctx := context.Background()
+	month := time.Date(now.UTC().Year(), now.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+	ct, err := s.pool.Exec(ctx,
 		`UPDATE credit_requests
 		 SET status = $2, resolved_at = NOW(), resolved_note = NULLIF($3, '')
-		 WHERE id = $1 AND status = 'pending'`,
-		id, status, note,
+		 WHERE id = $1 AND status = 'pending' AND period >= $4`,
+		id, status, note, month,
 	)
 	if err != nil {
 		return err
@@ -133,16 +163,23 @@ func (s *Store) ResolveCreditRequest(id int64, status, note string) error {
 		return nil
 	}
 
-	// Distinguish "no such request" from "already resolved".
+	// Distinguish "no such request" / "already resolved" / "stale period".
 	var current string
-	err = s.pool.QueryRow(context.Background(),
-		`SELECT status FROM credit_requests WHERE id = $1`, id,
-	).Scan(&current)
+	var period time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT status, period FROM credit_requests WHERE id = $1`, id,
+	).Scan(&current, &period)
 	if err == pgx.ErrNoRows {
 		return ErrCreditRequestNotFound
 	}
 	if err != nil {
 		return err
+	}
+	if current == "pending" && period.Before(month) {
+		if err := s.expireStaleCreditRequests(ctx, now); err != nil {
+			return err
+		}
+		return ErrCreditRequestExpired
 	}
 	return ErrCreditRequestResolved
 }

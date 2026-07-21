@@ -18,17 +18,17 @@ import (
 // caller (admin console, Discord bot) grants credits through
 // POST /api/admin/accounts/{id}/credits first, then marks the request.
 
-// parseCreditRequestStatus parses `?status=pending|granted|dismissed`.
+// parseCreditRequestStatus parses `?status=pending|granted|dismissed|expired`.
 // Empty defaults to pending — the actionable view.
 func parseCreditRequestStatus(r *http.Request) (string, string, string, error) {
 	raw := r.URL.Query().Get("status")
 	switch raw {
 	case "":
 		return "pending", "", "", nil
-	case "pending", "granted", "dismissed":
+	case "pending", "granted", "dismissed", "expired":
 		return raw, "", "", nil
 	default:
-		return "", "invalid_status", "status must be 'pending', 'granted' or 'dismissed'", strconv.ErrSyntax
+		return "", "invalid_status", "status must be 'pending', 'granted', 'dismissed' or 'expired'", strconv.ErrSyntax
 	}
 }
 
@@ -65,7 +65,7 @@ func (h *handler) listCreditRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.store.ListCreditRequests(status)
+	rows, err := h.store.ListCreditRequests(status, time.Now())
 	if err != nil {
 		slog.ErrorContext(r.Context(), "list credit requests error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to list credit requests")
@@ -126,12 +126,14 @@ func (h *handler) resolveCreditRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.ResolveCreditRequest(id, req.Status, req.Note); err != nil {
+	if err := h.store.ResolveCreditRequest(id, req.Status, req.Note, time.Now()); err != nil {
 		switch {
 		case errors.Is(err, store.ErrCreditRequestNotFound):
 			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Credit request not found")
 		case errors.Is(err, store.ErrCreditRequestResolved):
 			proxy.WriteError(w, r, http.StatusConflict, "already_resolved", "invalid_request_error", "Credit request was already resolved")
+		case errors.Is(err, store.ErrCreditRequestExpired):
+			proxy.WriteError(w, r, http.StatusConflict, "request_expired", "invalid_request_error", "Credit request expired at month rollover — the allowance has already reset")
 		default:
 			slog.ErrorContext(r.Context(), "resolve credit request error", "error", err, "credit_request_id", id)
 			proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to resolve credit request")
@@ -139,6 +141,5 @@ func (h *handler) resolveCreditRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"id": id, "status": req.Status})
+	writeEnvelope(w, map[string]any{"id": id, "status": req.Status}, nil)
 }

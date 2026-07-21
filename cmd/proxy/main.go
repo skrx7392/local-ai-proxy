@@ -348,5 +348,9 @@ func main() {
 	close(usageCh)
 	<-writerDone
 
+	// Drain in-flight cap-hit recordings (filed rows + webhook deliveries)
+	// before the deferred db.Close tears the pool down under them.
+	capHits.Wait()
+
 	slog.Info("shutdown complete")
 }

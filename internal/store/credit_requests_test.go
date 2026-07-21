@@ -83,7 +83,7 @@ func TestFileCreditRequest_RefileAfterGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("file: %v", err)
 	}
-	if err := s.ResolveCreditRequest(id, "granted", "+$5 via test"); err != nil {
+	if err := s.ResolveCreditRequest(id, "granted", "+$5 via test", time.Now()); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestFileCreditRequest_DismissSilencesMonth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("file: %v", err)
 	}
-	if err := s.ResolveCreditRequest(id, "dismissed", ""); err != nil {
+	if err := s.ResolveCreditRequest(id, "dismissed", "", time.Now()); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestResolveCreditRequest_Errors(t *testing.T) {
 	s := setupTestStore(t)
 	acc := provisionEndUser(t, s, "cr-6", "cr6@example.com", 5)
 
-	if err := s.ResolveCreditRequest(999999, "granted", ""); err != ErrCreditRequestNotFound {
+	if err := s.ResolveCreditRequest(999999, "granted", "", time.Now()); err != ErrCreditRequestNotFound {
 		t.Errorf("unknown id: expected ErrCreditRequestNotFound, got %v", err)
 	}
 
@@ -170,10 +170,10 @@ func TestResolveCreditRequest_Errors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("file: %v", err)
 	}
-	if err := s.ResolveCreditRequest(id, "granted", "+$1"); err != nil {
+	if err := s.ResolveCreditRequest(id, "granted", "+$1", time.Now()); err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
-	if err := s.ResolveCreditRequest(id, "dismissed", ""); err != ErrCreditRequestResolved {
+	if err := s.ResolveCreditRequest(id, "dismissed", "", time.Now()); err != ErrCreditRequestResolved {
 		t.Errorf("second resolve: expected ErrCreditRequestResolved, got %v", err)
 	}
 }
@@ -193,7 +193,7 @@ func TestListCreditRequests_JoinsAccountDisplay(t *testing.T) {
 		t.Fatalf("file B: %v", err)
 	}
 
-	rows, err := s.ListCreditRequests("pending")
+	rows, err := s.ListCreditRequests("pending", time.Now())
 	if err != nil {
 		t.Fatalf("ListCreditRequests: %v", err)
 	}
@@ -218,10 +218,10 @@ func TestListCreditRequests_JoinsAccountDisplay(t *testing.T) {
 		t.Errorf("expected balance 5 for A, got %v", rows[1].Balance)
 	}
 
-	if err := s.ResolveCreditRequest(idA, "granted", "+$5"); err != nil {
+	if err := s.ResolveCreditRequest(idA, "granted", "+$5", time.Now()); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	granted, err := s.ListCreditRequests("granted")
+	granted, err := s.ListCreditRequests("granted", time.Now())
 	if err != nil {
 		t.Fatalf("list granted: %v", err)
 	}
@@ -230,6 +230,69 @@ func TestListCreditRequests_JoinsAccountDisplay(t *testing.T) {
 	}
 	if granted[0].ResolvedAt == nil || granted[0].ResolvedNote == nil || *granted[0].ResolvedNote != "+$5" {
 		t.Errorf("expected resolution metadata, got at=%v note=%v", granted[0].ResolvedAt, granted[0].ResolvedNote)
+	}
+}
+
+func TestListCreditRequests_StalePendingExpires(t *testing.T) {
+	s := setupTestStore(t)
+	acc := provisionEndUser(t, s, "cr-9", "stale@example.com", 5)
+
+	july := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
+	august := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
+	id, _, err := s.FileCreditRequest(acc, july)
+	if err != nil {
+		t.Fatalf("file: %v", err)
+	}
+
+	// Listing in August: the July request stops being actionable — the
+	// allowance has reset, so granting against it would be a double grant.
+	pending, err := s.ListCreditRequests("pending", august)
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected no actionable requests after rollover, got %+v", pending)
+	}
+	expired, err := s.ListCreditRequests("expired", august)
+	if err != nil {
+		t.Fatalf("list expired: %v", err)
+	}
+	if len(expired) != 1 || expired[0].ID != id {
+		t.Fatalf("expected the July request expired, got %+v", expired)
+	}
+	if expired[0].ResolvedNote == nil || *expired[0].ResolvedNote != "expired at month rollover" {
+		t.Errorf("expected rollover note, got %v", expired[0].ResolvedNote)
+	}
+}
+
+func TestResolveCreditRequest_StalePeriodRefused(t *testing.T) {
+	s := setupTestStore(t)
+	acc := provisionEndUser(t, s, "cr-10", "stale2@example.com", 5)
+
+	july := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
+	august := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
+	id, _, err := s.FileCreditRequest(acc, july)
+	if err != nil {
+		t.Fatalf("file: %v", err)
+	}
+
+	// Resolving directly (an old Discord card) without any listing having
+	// run the lazy expiry first: still refused, and the row is expired.
+	if err := s.ResolveCreditRequest(id, "granted", "+$5", august); err != ErrCreditRequestExpired {
+		t.Fatalf("expected ErrCreditRequestExpired, got %v", err)
+	}
+	expired, err := s.ListCreditRequests("expired", august)
+	if err != nil || len(expired) != 1 || expired[0].ID != id {
+		t.Errorf("expected row expired after stale resolve, got %+v err=%v", expired, err)
+	}
+
+	// A fresh August request on the same account resolves normally.
+	id2, filed, err := s.FileCreditRequest(acc, august)
+	if err != nil || !filed {
+		t.Fatalf("august file: filed=%v err=%v", filed, err)
+	}
+	if err := s.ResolveCreditRequest(id2, "granted", "+$5", august); err != nil {
+		t.Errorf("august resolve: %v", err)
 	}
 }
 

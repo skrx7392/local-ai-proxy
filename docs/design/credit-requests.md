@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS credit_requests (
     id            BIGSERIAL PRIMARY KEY,
     account_id    BIGINT NOT NULL REFERENCES accounts(id),
     period        DATE NOT NULL,        -- first day of the UTC month (allowance_period convention)
-    status        TEXT NOT NULL DEFAULT 'pending',   -- pending | granted | dismissed
+    status        TEXT NOT NULL DEFAULT 'pending',   -- pending | granted | dismissed | expired
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     resolved_at   TIMESTAMPTZ,
     resolved_note TEXT                  -- e.g. '+$5 via discord by myrwin7'
@@ -64,6 +64,13 @@ CREATE INDEX IF NOT EXISTS idx_credit_requests_status ON credit_requests(status,
 
 Multiple `granted` rows per month are allowed and form the audit trail.
 
+**Month rollover**: a pending request whose period has passed stops being
+actionable — the allowance has reset, so granting against it would double up.
+Stale pending rows are **lazily expired** (status `expired`, same no-cron
+pattern as the allowance top-up): the pending listing expires them before
+returning, and a resolve attempt on a stale row is refused with
+`request_expired` and expires it.
+
 ## 2. Cap-hit detection
 
 Both `monthly_limit_reached` sites call a shared recorder when the billing account
@@ -72,9 +79,13 @@ is allowance-managed:
 1. `CreditGate` pre-check (`internal/credits/middleware.go`).
 2. The reserve-failure path in `handleChatCompletions` (`internal/proxy/proxy.go`).
 
-The recorder runs **async** (goroutine, own context with timeout, errors logged) so
-the 402 path stays fast — a capped user retrying in chat produces one indexed
-NOT-EXISTS probe per attempt and zero writes after the first.
+The recorder runs **async** (goroutine, errors logged) so the 402 path stays
+fast — a capped user retrying in chat produces one indexed NOT-EXISTS probe
+per attempt and zero writes after the first. The filing itself is never
+throttled or skipped (it is one fast insert, the same load profile as the
+402 handling); only webhook delivery is concurrency-capped, and only filing
+winners — at most one per account per month — ever reach delivery. Graceful
+shutdown drains in-flight recordings before closing the pool.
 
 On a successful insert (the winner), the recorder resolves display metadata
 (email/name via `federated_identities`, effective grant, spent ≈ grant − balance)
@@ -98,14 +109,17 @@ static — it does not re-check request state per 402.)
 
 ## 4. Admin API
 
-- `GET /api/admin/credit-requests?status=pending|granted|dismissed&limit&offset` —
+- `GET /api/admin/credit-requests?status=pending|granted|dismissed|expired&limit&offset` —
   list envelope; rows join account name, federated email, effective monthly grant,
-  current balance. Default filter: `pending`.
+  current balance. Default filter: `pending` (stale rows are expired before the
+  listing returns, so pending is always actionable).
 - `PUT /api/admin/credit-requests/{id}` body `{"status": "granted"|"dismissed", "note"?: string}` —
-  valid only from `pending` (409 `already_resolved` otherwise). Resolution does NOT
-  move money itself; the caller grants credits first (existing endpoint), then marks
-  the request. Keeping the two steps separate reuses the audited grant path and
-  keeps this endpoint trivial.
+  valid only from `pending` in the **current month** (409 `already_resolved` /
+  `request_expired` otherwise); response is a `{data: {id, status}}` envelope.
+  Resolution does NOT move money itself. Callers **mark first, then grant**: the
+  pending row is the idempotency lock, so a raced or stale actor can never grant
+  twice; a grant failure after marking is surfaced for manual follow-up (the safe
+  failure direction — no double money).
 - `GET /api/admin/accounts` rows gain `effective_monthly_grant` (the env default
   resolved server-side) so the UI never hardcodes the default.
 
@@ -122,12 +136,12 @@ Extends `local-ai-chat/discord-approval-bot/` (same deployment):
   same pattern as signups).
 - Buttons: **+$1 this month**, **+$5 this month**, **Dismiss**. Allow-list enforced
   exactly like signup buttons. No permanent-raise button (decision above).
-- Action flow: top-up → `POST /api/admin/accounts/{account_id}/credits`
-  `{amount, description: "credit-request top-up via discord"}` →
-  `PUT /api/admin/credit-requests/{id}` `{status:"granted", note:"+$N via discord by <user>"}` →
-  edit card to "✅ +$N by <name>". Dismiss → PUT dismissed → "⛔ Dismissed by <name>".
-  If the request was already resolved elsewhere (admin console), the PUT 409s and
-  the card is edited to reflect that instead of erroring.
+- Action flow (mark-first, see §4): top-up → `PUT /api/admin/credit-requests/{id}`
+  `{status:"granted", note:"+$N via discord by <user>"}`; on 409/404 the card
+  becomes "no longer actionable" and **no money moves**; on success →
+  `POST /api/admin/accounts/{account_id}/credits` → card "✅ +$N by <name>"
+  (a grant failure after marking edits the card to a manual-follow-up warning).
+  Dismiss → PUT dismissed → "⛔ Dismissed by <name>".
 - Startup reconcile: `GET /api/admin/credit-requests?status=pending` → announce any
   request whose marker is absent from recent channel history.
 - New env/secrets: `PROXY_ADMIN_URL` (`http://ai-proxy.local-ai.svc.cluster.local`),

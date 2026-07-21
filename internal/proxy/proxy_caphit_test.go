@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/krishna/local-ai-proxy/internal/billing"
 	"github.com/krishna/local-ai-proxy/internal/creditrequest"
@@ -52,7 +53,7 @@ func TestReserveFailure_AllowanceManaged_FilesCreditRequest(t *testing.T) {
 	}
 	rec.Wait()
 
-	rows, err := db.ListCreditRequests("pending")
+	rows, err := db.ListCreditRequests("pending", time.Now())
 	if err != nil {
 		t.Fatalf("ListCreditRequests: %v", err)
 	}

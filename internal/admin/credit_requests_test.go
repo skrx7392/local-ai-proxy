@@ -125,7 +125,7 @@ func TestCreditRequests_StatusFilterAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("file: %v", err)
 	}
-	if err := s.ResolveCreditRequest(id, "granted", "+$5 test"); err != nil {
+	if err := s.ResolveCreditRequest(id, "granted", "+$5 test", time.Now()); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 
@@ -168,8 +168,20 @@ func TestCreditRequests_Resolve(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
+	var env struct {
+		Data struct {
+			ID     int64  `json:"id"`
+			Status string `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode resolve envelope: %v (%s)", err, rec.Body.String())
+	}
+	if env.Data.ID != id || env.Data.Status != "granted" {
+		t.Errorf("expected {data:{id:%d,status:granted}}, got %s", id, rec.Body.String())
+	}
 
-	rows, err := s.ListCreditRequests("granted")
+	rows, err := s.ListCreditRequests("granted", time.Now())
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("expected 1 granted row, got %v err=%v", rows, err)
 	}
@@ -196,6 +208,41 @@ func TestCreditRequests_Resolve(t *testing.T) {
 	rec = adminPut(t, h, "/api/admin/credit-requests/not-a-number", `{"status":"granted"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for bad id, got %d", rec.Code)
+	}
+}
+
+func TestCreditRequests_StalePendingExpiresViaHTTP(t *testing.T) {
+	_, s := setupAdminTest(t)
+	h := newCreditRequestHandler(s)
+
+	acc := provisionEndUserAccount(t, s, "adm-5", "stale-http@example.com")
+	// File for LAST month (last day of it, so the period is unambiguous).
+	now := time.Now().UTC()
+	lastMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+	id, filed, err := s.FileCreditRequest(acc, lastMonth)
+	if err != nil || !filed {
+		t.Fatalf("backdated file: filed=%v err=%v", filed, err)
+	}
+
+	// A stale Discord card's button lands directly on the resolve endpoint:
+	// refused with a distinct code, no state left actionable.
+	rec := adminPut(t, h, "/api/admin/credit-requests/"+itoa(id), `{"status":"granted"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for stale resolve, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !bytes.Contains([]byte(body), []byte("request_expired")) {
+		t.Errorf("expected request_expired code, got %s", body)
+	}
+
+	rec = adminGet(t, h, "/api/admin/credit-requests")
+	rows, _ := decodeCreditRequestList(t, rec)
+	if len(rows) != 0 {
+		t.Errorf("pending view must be empty after expiry, got %+v", rows)
+	}
+	rec = adminGet(t, h, "/api/admin/credit-requests?status=expired")
+	rows, _ = decodeCreditRequestList(t, rec)
+	if len(rows) != 1 || rows[0].ID != id {
+		t.Errorf("expected the request under status=expired, got %+v", rows)
 	}
 }
 

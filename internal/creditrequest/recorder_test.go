@@ -3,6 +3,7 @@ package creditrequest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -69,7 +70,7 @@ func provisionCappedEndUser(t *testing.T, s *store.Store, extID, email string) i
 
 func pendingRequests(t *testing.T, s *store.Store, accountID int64) int {
 	t.Helper()
-	rows, err := s.ListCreditRequests("pending")
+	rows, err := s.ListCreditRequests("pending", time.Now())
 	if err != nil {
 		t.Fatalf("ListCreditRequests: %v", err)
 	}
@@ -227,6 +228,35 @@ func TestRecorder_WebhookFailureStillRecords(t *testing.T) {
 	// Delivery is attempted, then retried once on failure.
 	if got := hook.received(); len(got) != 2 {
 		t.Errorf("expected 2 delivery attempts (1 retry), got %d", len(got))
+	}
+}
+
+// Slow/failing deliveries must never cause a cap-hit to go unrecorded: the
+// filing always runs; only webhook delivery queues behind the concurrency
+// cap. (With the old whole-recording semaphore, accounts beyond the cap were
+// silently dropped.)
+func TestRecorder_SlowWebhookNeverBlocksFiling(t *testing.T) {
+	s := setupRecorderTest(t)
+
+	hook := &captureWebhook{status: http.StatusInternalServerError}
+	srv := httptest.NewServer(hook.handler())
+	defer srv.Close()
+
+	rec := New(s, srv.URL, 5.0)
+	const accounts = 10 // more than the delivery semaphore's 8 slots
+	for i := 0; i < accounts; i++ {
+		acc := provisionCappedEndUser(t, s,
+			fmt.Sprintf("sat-%d", i), fmt.Sprintf("sat%d@example.com", i))
+		rec.RecordCapHit(acc)
+	}
+	rec.Wait()
+
+	rows, err := s.ListCreditRequests("pending", time.Now())
+	if err != nil {
+		t.Fatalf("ListCreditRequests: %v", err)
+	}
+	if len(rows) != accounts {
+		t.Errorf("expected all %d cap-hits filed despite failing webhook, got %d", accounts, len(rows))
 	}
 }
 
