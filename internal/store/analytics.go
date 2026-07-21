@@ -405,24 +405,42 @@ func (s *Store) GetUsageTimeseries(f UsageFilter, interval string) ([]Timeseries
 	return out, rows.Err()
 }
 
-// GetUsageTimeseriesByModel returns per-(bucket, model) aggregates, ordered
-// by model then bucket ascending. interval must be "hour" or "day".
-// Gap-filling and top-N model selection are the caller's responsibility.
+// GetUsageTimeseriesByModel returns per-(bucket, model) aggregates for the
+// topModels models with the highest window token totals, ordered by model
+// then bucket ascending. interval must be "hour" or "day". Gap-filling is
+// the caller's responsibility. The top-N cut happens in SQL so cheap COUNT/
+// SUM ranking bounds the expensive percentile aggregation — model-name
+// cardinality is client-controlled (error rows log requested names verbatim).
 // Metric semantics match GetUsageByModel: speed uses completed rows that
 // recorded completion tokens, p95 covers all completed rows, avg covers
 // every row.
-func (s *Store) GetUsageTimeseriesByModel(f UsageFilter, interval string) ([]ModelTimeseriesRow, error) {
+func (s *Store) GetUsageTimeseriesByModel(f UsageFilter, interval string, topModels int) ([]ModelTimeseriesRow, error) {
 	switch interval {
 	case "hour", "day":
 	default:
 		return nil, fmt.Errorf("invalid interval %q: must be 'hour' or 'day'", interval)
+	}
+	if topModels <= 0 {
+		return nil, fmt.Errorf("invalid topModels %d: must be positive", topModels)
 	}
 
 	var sb strings.Builder
 	// date_trunc stays explicitly UTC for the same reason as GetUsageTimeseries:
 	// handler gap-fill keys on UTC bucket boundaries.
 	sb.WriteString(
-		`SELECT
+		`WITH top_models AS (
+		   SELECT ul.model
+		   FROM usage_logs ul
+		   JOIN api_keys k ON ul.api_key_id = k.id
+		   WHERE 1=1`)
+	args := []any{interval, topModels}
+	args, next := buildUsageFilterClause(&sb, args, f, 3)
+	sb.WriteString(
+		`  GROUP BY ul.model
+		   ORDER BY COALESCE(SUM(ul.total_tokens), 0) DESC, ul.model
+		   LIMIT $2
+		 )
+		 SELECT
 		   date_trunc($1, ul.created_at AT TIME ZONE 'UTC'),
 		   ul.model,
 		   COUNT(*),
@@ -437,10 +455,8 @@ func (s *Store) GetUsageTimeseriesByModel(f UsageFilter, interval string) ([]Mod
 		   percentile_cont(0.95) WITHIN GROUP (ORDER BY ul.duration_ms) FILTER (WHERE ul.status = 'completed')
 		 FROM usage_logs ul
 		 JOIN api_keys k ON ul.api_key_id = k.id
-		 WHERE 1=1`)
-
-	args := []any{interval}
-	args, _ = buildUsageFilterClause(&sb, args, f, 2)
+		 WHERE ul.model IN (SELECT model FROM top_models)`)
+	args, _ = buildUsageFilterClause(&sb, args, f, next)
 	sb.WriteString(` GROUP BY 1, 2 ORDER BY 2, 1`)
 
 	rows, err := s.pool.Query(context.Background(), sb.String(), args...)

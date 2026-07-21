@@ -478,14 +478,16 @@ func (h *handler) getUsageTimeseriesByModel(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	rows, err := h.store.GetUsageTimeseriesByModel(f, interval)
+	// The store enforces the maxTimeseriesModels cut in SQL (cheap ranking
+	// bounds the expensive percentile work); here we only group and order
+	// the surviving rows for presentation.
+	rows, err := h.store.GetUsageTimeseriesByModel(f, interval, maxTimeseriesModels)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "usage timeseries by model error", "error", err)
 		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to get usage timeseries by model")
 		return
 	}
 
-	// Rank models by window token total, keep the top maxTimeseriesModels.
 	byModel := make(map[string][]store.ModelTimeseriesRow)
 	totals := make(map[string]int)
 	order := make([]string, 0)
@@ -497,9 +499,6 @@ func (h *handler) getUsageTimeseriesByModel(w http.ResponseWriter, r *http.Reque
 		totals[row.Model] += row.TotalTokens
 	}
 	sort.SliceStable(order, func(i, j int) bool { return totals[order[i]] > totals[order[j]] })
-	if len(order) > maxTimeseriesModels {
-		order = order[:maxTimeseriesModels]
-	}
 
 	// Dense, aligned series: one bucket per interval step in [since, until)
 	// for every model, zero-filled with null speed/p95 where no rows exist.
