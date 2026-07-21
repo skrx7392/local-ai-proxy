@@ -1011,11 +1011,21 @@ func TestUsageTimeseriesByModel_Validation(t *testing.T) {
 	for _, path := range []string{
 		"/api/admin/usage/timeseries-by-model?interval=fortnight",
 		"/api/admin/usage/timeseries-by-model?since=2026-04-10&until=2026-04-10",
+		// Oversized gap-fill windows are rejected on BOTH timeseries
+		// endpoints, not silently allocated (1970→9999 hourly ≈ 70M buckets).
+		"/api/admin/usage/timeseries-by-model?interval=hour&since=1970-01-01&until=9999-01-01",
+		"/api/admin/usage/timeseries?interval=hour&since=1970-01-01&until=9999-01-01",
+		"/api/admin/usage/timeseries?interval=day&since=1970-01-01&until=9999-01-01",
 	} {
 		rec := doAdmin(t, h, path)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400 (body=%s)", path, rec.Code, rec.Body.String())
 		}
+	}
+	// A window right at the cap still works: 83 days hourly = 1992 buckets.
+	rec := doAdmin(t, h, "/api/admin/usage/timeseries?interval=hour&since=2026-01-01&until=2026-03-25")
+	if rec.Code != http.StatusOK {
+		t.Errorf("at-cap window: status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 }
 

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -132,7 +133,30 @@ const (
 	// so cardinality is client-controlled. 12 matches the FE chart palette;
 	// the cut keeps the highest window token totals.
 	maxTimeseriesModels = 12
+	// maxTimeseriesBuckets bounds gap-fill allocation on both timeseries
+	// endpoints: since/until are client-controlled, and an oversized window
+	// with interval=hour would otherwise allocate one bucket per hour per
+	// series before encoding (e.g. since=1970&until=9999 ≈ 70M buckets).
+	// 2000 covers ~83 days hourly or ~5.5 years daily — beyond either,
+	// callers must coarsen the interval or shrink the range.
+	maxTimeseriesBuckets = 2000
 )
+
+// checkBucketCount rejects [since, until) windows that would gap-fill more
+// than maxTimeseriesBuckets steps at the given interval. Returns a 400-ready
+// code/message pair when the window is too large.
+func checkBucketCount(since, until time.Time, interval string) (code, msg string, err error) {
+	step := time.Hour
+	if interval == "day" {
+		step = 24 * time.Hour
+	}
+	if until.Sub(since) > time.Duration(maxTimeseriesBuckets)*step {
+		return "invalid_range",
+			"Time window too large for interval: reduce the range or use a coarser interval",
+			fmt.Errorf("window %s exceeds %d %s buckets", until.Sub(since), maxTimeseriesBuckets, interval)
+	}
+	return "", "", nil
+}
 
 // parseTimeParam accepts RFC3339 or YYYY-MM-DD. Returns a descriptive error
 // with a short code suitable for proxy.WriteError.
@@ -443,6 +467,11 @@ func (h *handler) getUsageTimeseries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if bcode, bmsg, berr := checkBucketCount(*f.Since, *f.Until, interval); berr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, bcode, "invalid_request_error", bmsg)
+		return
+	}
+
 	rows, err := h.store.GetUsageTimeseries(f, interval)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "usage timeseries error", "error", err)
@@ -475,6 +504,11 @@ func (h *handler) getUsageTimeseriesByModel(w http.ResponseWriter, r *http.Reque
 	interval, icode, imsg, ierr := parseInterval(r, *f.Since, *f.Until)
 	if ierr != nil {
 		proxy.WriteError(w, r, http.StatusBadRequest, icode, "invalid_request_error", imsg)
+		return
+	}
+
+	if bcode, bmsg, berr := checkBucketCount(*f.Since, *f.Until, interval); berr != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, bcode, "invalid_request_error", bmsg)
 		return
 	}
 
