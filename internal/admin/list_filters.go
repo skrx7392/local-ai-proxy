@@ -56,15 +56,15 @@ func parseRoleFilter(r *http.Request) (string, string, string, error) {
 	}
 }
 
-// parseAccountTypeFilter parses `?type=personal|service`. Empty returns "".
+// parseAccountTypeFilter parses `?type=personal|service|end_user`. Empty returns "".
 func parseAccountTypeFilter(r *http.Request) (string, string, string, error) {
 	raw := r.URL.Query().Get("type")
 	switch raw {
 	case "":
 		return "", "", "", nil
-	case "personal", "service":
+	case "personal", "service", "end_user":
 		return raw, "", "", nil
 	default:
-		return "", "invalid_type", "type must be 'personal' or 'service'", strconv.ErrSyntax
+		return "", "invalid_type", "type must be 'personal', 'service' or 'end_user'", strconv.ErrSyntax
 	}
 }
