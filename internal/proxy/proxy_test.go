@@ -102,6 +102,7 @@ func setupTestDB(t *testing.T) *store.Store {
 		_, _ = pool.Exec(c, "DELETE FROM user_sessions")
 		_, _ = pool.Exec(c, "DELETE FROM api_keys")
 		_, _ = pool.Exec(c, "DELETE FROM users")
+		_, _ = pool.Exec(c, "DELETE FROM federated_identities")
 		_, _ = pool.Exec(c, "DELETE FROM accounts")
 	}
 	wipe()
@@ -1228,7 +1229,7 @@ func TestLogUsage_NilKey(t *testing.T) {
 	h := &handler{usageCh: usageCh}
 
 	// Should not panic and should not send to channel
-	h.logUsage(nil, usageData{Model: "test"}, time.Second, "completed", 0, nil)
+	h.logUsage(nil, billingInfo{}, usageData{Model: "test"}, time.Second, "completed", 0, nil)
 
 	select {
 	case entry := <-usageCh:
@@ -1247,7 +1248,7 @@ func TestLogUsage_ChannelFull(t *testing.T) {
 	key := testAPIKey()
 
 	// Should not block — entry is dropped silently
-	h.logUsage(key, usageData{Model: "test"}, time.Second, "completed", 0, nil)
+	h.logUsage(key, billingInfo{}, usageData{Model: "test"}, time.Second, "completed", 0, nil)
 
 	// Drain the original entry
 	<-usageCh
@@ -1272,7 +1273,7 @@ func TestLogUsage_Success(t *testing.T) {
 	ud.Usage.TotalTokens = 15
 
 	nodeID := int64(7)
-	h.logUsage(key, ud, 500*time.Millisecond, "completed", 0.12, &nodeID)
+	h.logUsage(key, billingInfo{}, ud, 500*time.Millisecond, "completed", 0.12, &nodeID)
 
 	select {
 	case entry := <-usageCh:

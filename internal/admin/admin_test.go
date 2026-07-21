@@ -44,6 +44,7 @@ func setupAdminTest(t *testing.T) (http.Handler, *store.Store) {
 		_, _ = p.Exec(c, "DELETE FROM user_sessions")
 		_, _ = p.Exec(c, "DELETE FROM api_keys")
 		_, _ = p.Exec(c, "DELETE FROM users")
+		_, _ = p.Exec(c, "DELETE FROM federated_identities")
 		_, _ = p.Exec(c, "DELETE FROM accounts")
 	}
 

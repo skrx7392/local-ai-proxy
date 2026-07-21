@@ -43,6 +43,12 @@ type Config struct {
 	// working; operators can lower it via ADMIN_SERVICE_CREDIT_GRANT.
 	AdminServiceCreditGrant float64
 
+	// EndUserMonthlyGrant (END_USER_MONTHLY_GRANT, default 5.0) is the
+	// monthly allowance for auto-provisioned end-user accounts, overridable
+	// per account via accounts.monthly_grant. See
+	// docs/design/end-user-accounts.md.
+	EndUserMonthlyGrant float64
+
 	// Public auth-surface rate limits (requests per minute) and the global
 	// bcrypt concurrency cap. See internal/authlimit.
 	AuthLoginPerMinIP     int
@@ -110,6 +116,21 @@ func Load() (Config, error) {
 		adminServiceCreditGrant = n
 	}
 
+	// Monthly allowance for auto-provisioned end-user accounts. Zero is a
+	// valid operator choice (new end users start blocked until an admin sets
+	// a per-account override); negative is a configuration error.
+	endUserMonthlyGrant := 5.0
+	if v := os.Getenv("END_USER_MONTHLY_GRANT"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid END_USER_MONTHLY_GRANT: %w", err)
+		}
+		if n < 0 {
+			return Config{}, fmt.Errorf("invalid END_USER_MONTHLY_GRANT: must be >= 0, got %v", n)
+		}
+		endUserMonthlyGrant = n
+	}
+
 	authLoginIP, err := intEnvOrDefault("AUTH_RATELIMIT_LOGIN_PER_MIN", 5)
 	if err != nil {
 		return Config{}, err
@@ -168,6 +189,7 @@ func Load() (Config, error) {
 		LogLevel:            envOrDefault("LOG_LEVEL", "info"),
 
 		AdminServiceCreditGrant: adminServiceCreditGrant,
+		EndUserMonthlyGrant:     endUserMonthlyGrant,
 
 		AuthLoginPerMinIP:     authLoginIP,
 		AuthLoginPerMinEmail:  authLoginEmail,

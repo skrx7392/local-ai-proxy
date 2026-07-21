@@ -15,6 +15,7 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/admin"
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/authlimit"
+	"github.com/krishna/local-ai-proxy/internal/billing"
 	"github.com/krishna/local-ai-proxy/internal/bootstrap"
 	"github.com/krishna/local-ai-proxy/internal/config"
 	"github.com/krishna/local-ai-proxy/internal/credits"
@@ -209,6 +210,7 @@ func main() {
 	proxyHandler := proxy.NewHandler(reg, usageCh, cfg.MaxRequestBody, db, m,
 		proxy.Options{ModelsListAll: cfg.ModelsListAll})
 	authMiddleware := auth.Middleware(db)
+	billingResolver := billing.Middleware(db, cfg.EndUserMonthlyGrant)
 	creditGate := credits.CreditGate(db, m)
 	rateLimitMiddleware := ratelimit.Middleware(limiter, m)
 	cors := middleware.CORS(cfg.CORSOrigins)
@@ -277,8 +279,11 @@ func main() {
 	mux.HandleFunc("GET /api/healthz/ready", hc.ReadyHandler)
 	mux.HandleFunc("GET /api/healthz", hc.LiveHandler) // backward compat alias
 
-	// Client API — CORS + auth + credit gate + rate limit + proxy (instrumented)
-	mux.Handle("/api/v1/", m.InstrumentHandler(cors(authMiddleware(creditGate(rateLimitMiddleware(proxyHandler))))))
+	// Client API — CORS + auth + billing resolution + credit gate + rate limit
+	// + proxy (instrumented). Billing MUST precede the credit gate: the gate
+	// pre-checks the resolved billing account, not the key's own account
+	// (docs/design/end-user-accounts.md §4).
+	mux.Handle("/api/v1/", m.InstrumentHandler(cors(authMiddleware(billingResolver(creditGate(rateLimitMiddleware(proxyHandler)))))))
 
 	// Metrics endpoint — unauthenticated, cluster-internal only
 	mux.Handle("GET /metrics", m.Handler())
