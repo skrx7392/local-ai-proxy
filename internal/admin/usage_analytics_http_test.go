@@ -328,6 +328,115 @@ func TestUsageByModel_NodeFilter(t *testing.T) {
 	}
 }
 
+// seedPerfMetricsUsage adds rows for two extra models on top of the base
+// fixture, with hand-computable performance metrics:
+//
+//	bench:7b (5 rows):
+//	  completed  p=100 c=200 dur=1000
+//	  completed  p=100 c=400 dur=2000
+//	  completed  p=0   c=0   dur=3000  (usage extraction failed — no tokens)
+//	  error      p=50  c=0   dur=100
+//	  partial    p=80  c=40  dur=500
+//	allfail:1b (1 row):
+//	  error      p=10  c=0   dur=50
+func seedPerfMetricsUsage(t *testing.T, s *store.Store, fx usageFixture) {
+	t.Helper()
+	ctx := context.Background()
+	type row struct {
+		model        string
+		prompt, comp int
+		dur          int64
+		status       string
+	}
+	rows := []row{
+		{"bench:7b", 100, 200, 1000, "completed"},
+		{"bench:7b", 100, 400, 2000, "completed"},
+		{"bench:7b", 0, 0, 3000, "completed"},
+		{"bench:7b", 50, 0, 100, "error"},
+		{"bench:7b", 80, 40, 500, "partial"},
+		{"allfail:1b", 10, 0, 50, "error"},
+	}
+	for i, r := range rows {
+		if _, err := s.Pool().Exec(ctx,
+			`INSERT INTO usage_logs (api_key_id, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, credits_charged, created_at, node_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			fx.keyUser, r.model, r.prompt, r.comp, r.prompt+r.comp, r.dur, r.status, 0.1, fx.t0.Add(time.Duration(i)*time.Minute), &fx.nodeA,
+		); err != nil {
+			t.Fatalf("insert perf usage: %v", err)
+		}
+	}
+}
+
+func TestUsageByModel_PerformanceMetrics(t *testing.T) {
+	h, s := setupAdminTest(t)
+	fx := seedUsageFixtureHTTP(t, s)
+	seedPerfMetricsUsage(t, s, fx)
+
+	rec := doAdmin(t, h, "/api/admin/usage/by-model?since="+fx.t0.Format(time.RFC3339))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data []modelUsageDTO `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	byModel := make(map[string]modelUsageDTO, len(body.Data))
+	for _, d := range body.Data {
+		byModel[d.Model] = d
+	}
+
+	bench, ok := byModel["bench:7b"]
+	if !ok {
+		t.Fatalf("bench:7b missing, body=%s", rec.Body.String())
+	}
+	if bench.Requests != 5 || bench.TotalTokens != 970 {
+		t.Errorf("bench requests/total = %d/%d, want 5/970", bench.Requests, bench.TotalTokens)
+	}
+	if bench.PromptTokens != 330 || bench.CompletionTokens != 640 {
+		t.Errorf("bench prompt/completion = %d/%d, want 330/640", bench.PromptTokens, bench.CompletionTokens)
+	}
+	// Speed uses only completed rows that actually recorded completion
+	// tokens: (200+400) tokens / (1000+2000)ms = 200 tok/s. The zero-token
+	// completed row and the error/partial rows must not dilute it.
+	if bench.TokPerSec == nil || *bench.TokPerSec < 199.99 || *bench.TokPerSec > 200.01 {
+		t.Errorf("bench tok_per_sec = %v, want 200", bench.TokPerSec)
+	}
+	// Percentiles cover all completed rows (latency is real even when token
+	// extraction failed): durations {1000, 2000, 3000}.
+	if bench.P50DurationMs == nil || *bench.P50DurationMs != 2000 {
+		t.Errorf("bench p50 = %v, want 2000", bench.P50DurationMs)
+	}
+	if bench.P95DurationMs == nil || *bench.P95DurationMs < 2899.99 || *bench.P95DurationMs > 2900.01 {
+		t.Errorf("bench p95 = %v, want 2900", bench.P95DurationMs)
+	}
+	if bench.ErrorCount != 1 || bench.PartialCount != 1 {
+		t.Errorf("bench errors/partials = %d/%d, want 1/1", bench.ErrorCount, bench.PartialCount)
+	}
+
+	// A model with no completed rows has no speed or latency percentiles —
+	// null, not zero (zero would read as "instant").
+	allfail, ok := byModel["allfail:1b"]
+	if !ok {
+		t.Fatalf("allfail:1b missing, body=%s", rec.Body.String())
+	}
+	if allfail.TokPerSec != nil || allfail.P50DurationMs != nil || allfail.P95DurationMs != nil {
+		t.Errorf("allfail speed/percentiles = %v/%v/%v, want all null",
+			allfail.TokPerSec, allfail.P50DurationMs, allfail.P95DurationMs)
+	}
+	if allfail.ErrorCount != 1 || allfail.Requests != 1 {
+		t.Errorf("allfail errors/requests = %d/%d, want 1/1", allfail.ErrorCount, allfail.Requests)
+	}
+
+	// Pre-existing fixture model keeps its established aggregates (guard
+	// against the new aggregates changing grouping or filtering).
+	llama := byModel["llama3.1:8b"]
+	if llama.Requests != 3 || llama.TotalTokens != 1200 {
+		t.Errorf("llama requests/total = %d/%d, want 3/1200", llama.Requests, llama.TotalTokens)
+	}
+}
+
 // --- by-user --------------------------------------------------------------
 
 func TestUsageByUser_OwnerTypeDerivation(t *testing.T) {
