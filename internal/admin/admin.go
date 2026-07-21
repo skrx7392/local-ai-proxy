@@ -165,6 +165,7 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	mux.HandleFunc("GET /api/admin/usage/summary", handler.getUsageSummary)
 	mux.HandleFunc("GET /api/admin/usage/by-model", handler.getUsageByModel)
 	mux.HandleFunc("GET /api/admin/usage/by-user", handler.getUsageByUser)
+	mux.HandleFunc("GET /api/admin/usage/by-account", handler.getUsageByAccount)
 	mux.HandleFunc("GET /api/admin/usage/timeseries", handler.getUsageTimeseries)
 	mux.HandleFunc("GET /api/admin/users", handler.listUsers)
 	mux.HandleFunc("GET /api/admin/users/{id}", handler.getUser)

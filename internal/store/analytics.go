@@ -61,6 +61,23 @@ type OwnerUsageRow struct {
 	KeyCount    int
 }
 
+// AccountUsageRow is one row of GetUsageByAccount: aggregates grouped by the
+// billing account — usage_logs.account_id when the row was attributed (end-user
+// traffic on trusted keys), else the key's own account. A NULL AccountID row
+// collects usage from keys that have no account (legacy admin-created keys).
+// Email is display metadata: the account's federated-identity email (end_user
+// accounts) or the owning user's email (personal accounts), else NULL.
+type AccountUsageRow struct {
+	AccountID   *int64
+	AccountName *string
+	AccountType *string
+	Email       *string
+	Requests    int
+	TotalTokens int
+	Credits     float64
+	KeyCount    int
+}
+
 // TimeseriesBucket is one bucket of GetUsageTimeseries.
 type TimeseriesBucket struct {
 	Bucket           time.Time
@@ -226,6 +243,64 @@ func (s *Store) GetUsageByUser(f UsageFilter) ([]OwnerUsageRow, error) {
 		if err := rows.Scan(&r.UserID, &r.Email, &r.Name, &r.AccountID, &r.AccountName, &r.AccountType,
 			&r.Requests, &r.TotalTokens, &r.Credits, &r.KeyCount); err != nil {
 			return nil, fmt.Errorf("scan owner row: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetUsageByAccount returns per-billing-account aggregates, ordered by
+// total_tokens desc. Aggregation happens in a subquery so the account/email
+// joins run once per account, not once per usage row.
+func (s *Store) GetUsageByAccount(f UsageFilter) ([]AccountUsageRow, error) {
+	var sb strings.Builder
+	sb.WriteString(
+		`SELECT
+		   g.account_id,
+		   a.name,
+		   a.type,
+		   COALESCE(fi.email, usr.email),
+		   g.requests,
+		   g.total_tokens,
+		   g.credits,
+		   g.key_count
+		 FROM (
+		   SELECT
+		     COALESCE(ul.account_id, k.account_id) AS account_id,
+		     COUNT(*) AS requests,
+		     COALESCE(SUM(ul.total_tokens), 0) AS total_tokens,
+		     COALESCE(SUM(ul.credits_charged), 0) AS credits,
+		     COUNT(DISTINCT ul.api_key_id) AS key_count
+		   FROM usage_logs ul
+		   JOIN api_keys k ON ul.api_key_id = k.id
+		   WHERE 1=1`)
+	args, _ := buildUsageFilterClause(&sb, nil, f, 1)
+	sb.WriteString(
+		`   GROUP BY COALESCE(ul.account_id, k.account_id)
+		 ) g
+		 LEFT JOIN accounts a ON a.id = g.account_id
+		 LEFT JOIN LATERAL (
+		     SELECT email FROM federated_identities
+		     WHERE account_id = a.id ORDER BY id LIMIT 1
+		 ) fi ON TRUE
+		 LEFT JOIN LATERAL (
+		     SELECT email FROM users
+		     WHERE account_id = a.id ORDER BY id LIMIT 1
+		 ) usr ON TRUE
+		 ORDER BY g.total_tokens DESC`)
+
+	rows, err := s.pool.Query(context.Background(), sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("usage by account: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]AccountUsageRow, 0)
+	for rows.Next() {
+		var r AccountUsageRow
+		if err := rows.Scan(&r.AccountID, &r.AccountName, &r.AccountType, &r.Email,
+			&r.Requests, &r.TotalTokens, &r.Credits, &r.KeyCount); err != nil {
+			return nil, fmt.Errorf("scan account row: %w", err)
 		}
 		out = append(out, r)
 	}
