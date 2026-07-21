@@ -41,7 +41,7 @@ func TestLegacyAdminKey_ChatsAfterBackfill(t *testing.T) {
 
 	usageCh := make(chan store.UsageEntry, 10)
 	proxyHandler := NewHandler(singleNodeRegistry(t, upstream.URL, model), usageCh, 52428800, db, nil, Options{})
-	chain := credits.CreditGate(db, nil)(proxyHandler)
+	chain := credits.CreditGate(db, nil, nil)(proxyHandler)
 
 	chat := func(reqModel string) *httptest.ResponseRecorder {
 		key, err := db.GetKeyByHash(keyHash)
@@ -119,7 +119,7 @@ func TestCreditGateChain_NoBypassForNilAccount(t *testing.T) {
 
 	usageCh := make(chan store.UsageEntry, 10)
 	proxyHandler := NewHandler(singleNodeRegistry(t, upstream.URL, "m"), usageCh, 52428800, db, nil, Options{})
-	chain := credits.CreditGate(db, nil)(proxyHandler)
+	chain := credits.CreditGate(db, nil, nil)(proxyHandler)
 
 	key := &store.APIKey{ID: 42, Name: "detached"} // AccountID nil
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completions",

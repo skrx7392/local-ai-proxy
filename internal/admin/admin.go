@@ -63,6 +63,10 @@ type handler struct {
 	// this a no-op lookup). Zero in tests is fine — grants can be added via
 	// POST /api/admin/accounts/{id}/credits.
 	adminServiceCreditGrant float64
+
+	// Env-default monthly allowance, used to resolve each account's
+	// effective grant server-side (accounts + credit-requests listings).
+	endUserMonthlyGrant float64
 }
 
 // NodeSnapshotter exposes the node registry's current routing state.
@@ -95,6 +99,10 @@ type Options struct {
 	// OSS-2: initial grant for the admin service account when created on
 	// demand (see handler.adminServiceCreditGrant).
 	AdminServiceCreditGrant float64
+
+	// Env-default monthly allowance (cfg.EndUserMonthlyGrant); see
+	// handler.endUserMonthlyGrant.
+	EndUserMonthlyGrant float64
 }
 
 type adminSessionCtxKey struct{}
@@ -155,6 +163,7 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 		nodeRefresher:     opts.Refresher,
 
 		adminServiceCreditGrant: opts.AdminServiceCreditGrant,
+		endUserMonthlyGrant:     opts.EndUserMonthlyGrant,
 	}
 
 	mux := http.NewServeMux()
@@ -186,6 +195,10 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	mux.HandleFunc("POST /api/admin/accounts/{id}/credits", handler.grantCredits)
 	mux.HandleFunc("POST /api/admin/accounts/{id}/keys", handler.createAccountKey)
 	mux.HandleFunc("PUT /api/admin/accounts/{id}/allowance", handler.setAccountAllowance)
+
+	// Credit requests (docs/design/credit-requests.md).
+	mux.HandleFunc("GET /api/admin/credit-requests", handler.listCreditRequests)
+	mux.HandleFunc("PUT /api/admin/credit-requests/{id}", handler.resolveCreditRequest)
 
 	// Registration tokens
 	mux.HandleFunc("POST /api/admin/registration-tokens", handler.createRegistrationToken)
@@ -688,7 +701,10 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		CreatedAt        string   `json:"created_at"`
 		AllowanceManaged bool     `json:"allowance_managed"`
 		MonthlyGrant     *float64 `json:"monthly_grant"`
-		Email            *string  `json:"email"`
+		// EffectiveMonthlyGrant resolves the override against the env
+		// default server-side; null for non-allowance-managed accounts.
+		EffectiveMonthlyGrant *float64 `json:"effective_monthly_grant"`
+		Email                 *string  `json:"email"`
 	}
 
 	resp := make([]accountResponse, 0, len(accounts))
@@ -699,18 +715,27 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		if isActive != nil && a.IsActive != *isActive {
 			continue
 		}
+		var effectiveGrant *float64
+		if a.AllowanceManaged {
+			g := h.endUserMonthlyGrant
+			if a.MonthlyGrant != nil {
+				g = *a.MonthlyGrant
+			}
+			effectiveGrant = &g
+		}
 		resp = append(resp, accountResponse{
-			ID:               a.ID,
-			Name:             a.Name,
-			Type:             a.Type,
-			IsActive:         a.IsActive,
-			Balance:          a.Balance,
-			Reserved:         a.Reserved,
-			Available:        a.Balance - a.Reserved,
-			CreatedAt:        a.CreatedAt.Format(time.RFC3339),
-			AllowanceManaged: a.AllowanceManaged,
-			MonthlyGrant:     a.MonthlyGrant,
-			Email:            a.FederatedEmail,
+			ID:                    a.ID,
+			Name:                  a.Name,
+			Type:                  a.Type,
+			IsActive:              a.IsActive,
+			Balance:               a.Balance,
+			Reserved:              a.Reserved,
+			Available:             a.Balance - a.Reserved,
+			CreatedAt:             a.CreatedAt.Format(time.RFC3339),
+			AllowanceManaged:      a.AllowanceManaged,
+			MonthlyGrant:          a.MonthlyGrant,
+			EffectiveMonthlyGrant: effectiveGrant,
+			Email:                 a.FederatedEmail,
 		})
 	}
 

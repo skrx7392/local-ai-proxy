@@ -21,6 +21,7 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/apierror"
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/billing"
+	"github.com/krishna/local-ai-proxy/internal/creditrequest"
 	"github.com/krishna/local-ai-proxy/internal/credits"
 	"github.com/krishna/local-ai-proxy/internal/metrics"
 	"github.com/krishna/local-ai-proxy/internal/registry"
@@ -57,6 +58,10 @@ type Options struct {
 	// actively priced model regardless of node availability. Default false:
 	// only models served by at least one healthy node are listed.
 	ModelsListAll bool
+
+	// CapHits records allowance cap-hits on the reserve-failure 402 path
+	// (docs/design/credit-requests.md). Nil = recording disabled.
+	CapHits *creditrequest.Recorder
 }
 
 type handler struct {
@@ -67,6 +72,7 @@ type handler struct {
 	db            *store.Store     // nil = credits disabled
 	metrics       *metrics.Metrics // nil = metrics disabled
 	modelsListAll bool
+	capHits       *creditrequest.Recorder // nil-safe
 }
 
 // requestMeta holds fields peeked from the request body.
@@ -109,6 +115,7 @@ func NewHandler(reg Registry, usageCh chan<- store.UsageEntry, maxBody int64, db
 		db:            db,
 		metrics:       m,
 		modelsListAll: opts.ModelsListAll,
+		capHits:       opts.CapHits,
 	}
 }
 
@@ -319,8 +326,9 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		holdID, err = h.db.ReserveCredits(*bill.AccountID, reserveAmount)
 		if err != nil {
 			if bill.AllowanceManaged {
+				h.capHits.RecordCapHit(*bill.AccountID)
 				writeError(w, r, http.StatusPaymentRequired, "monthly_limit_reached", "invalid_request_error",
-					"Monthly usage limit reached — resets next month")
+					creditrequest.MonthlyLimitMessage)
 				return
 			}
 			writeError(w, r, http.StatusPaymentRequired, "insufficient_credits", "invalid_request_error",
