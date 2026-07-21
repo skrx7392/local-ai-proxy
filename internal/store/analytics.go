@@ -38,11 +38,23 @@ type UsageSummary struct {
 
 // ModelUsageRow is one row of GetUsageByModel.
 type ModelUsageRow struct {
-	Model         string
-	Requests      int
-	TotalTokens   int
-	Credits       float64
-	AvgDurationMs float64
+	Model            string
+	Requests         int
+	TotalTokens      int
+	Credits          float64
+	AvgDurationMs    float64
+	PromptTokens     int
+	CompletionTokens int
+	// TokPerSec is completion tokens per second over completed requests that
+	// recorded completion tokens; nil when the group has none. P50/P95 cover
+	// all completed requests; nil when the group has none. ErrorCount and
+	// PartialCount surface non-completed statuses (upstream failures and
+	// client disconnects respectively).
+	TokPerSec     *float64
+	P50DurationMs *float64
+	P95DurationMs *float64
+	ErrorCount    int
+	PartialCount  int
 }
 
 // OwnerUsageRow is one row of GetUsageByUser. Either the user fields or the
@@ -173,13 +185,27 @@ func (s *Store) GetUsageSummary(f UsageFilter) (UsageSummary, error) {
 // GetUsageByModel returns per-model aggregates, ordered by total_tokens desc.
 func (s *Store) GetUsageByModel(f UsageFilter) ([]ModelUsageRow, error) {
 	var sb strings.Builder
+	// Speed only counts completed requests that recorded completion tokens
+	// (streaming rows where usage extraction failed log zero tokens but real
+	// duration — including them would drag the rate toward zero). Latency
+	// percentiles cover all completed requests: a zero-token completion still
+	// took real wall time. Error rows are excluded from both — they return
+	// fast and would flatter every latency number.
 	sb.WriteString(
 		`SELECT
 		   ul.model,
 		   COUNT(*),
 		   COALESCE(SUM(ul.total_tokens), 0),
 		   COALESCE(SUM(ul.credits_charged), 0),
-		   COALESCE(AVG(ul.duration_ms), 0)
+		   COALESCE(AVG(ul.duration_ms), 0),
+		   COALESCE(SUM(ul.prompt_tokens), 0),
+		   COALESCE(SUM(ul.completion_tokens), 0),
+		   SUM(ul.completion_tokens) FILTER (WHERE ul.status = 'completed' AND ul.completion_tokens > 0 AND ul.duration_ms > 0)::float8
+		     / NULLIF(SUM(ul.duration_ms) FILTER (WHERE ul.status = 'completed' AND ul.completion_tokens > 0 AND ul.duration_ms > 0) / 1000.0, 0),
+		   percentile_cont(0.5) WITHIN GROUP (ORDER BY ul.duration_ms) FILTER (WHERE ul.status = 'completed'),
+		   percentile_cont(0.95) WITHIN GROUP (ORDER BY ul.duration_ms) FILTER (WHERE ul.status = 'completed'),
+		   COUNT(*) FILTER (WHERE ul.status = 'error'),
+		   COUNT(*) FILTER (WHERE ul.status = 'partial')
 		 FROM usage_logs ul
 		 JOIN api_keys k ON ul.api_key_id = k.id
 		 WHERE 1=1`)
@@ -195,7 +221,9 @@ func (s *Store) GetUsageByModel(f UsageFilter) ([]ModelUsageRow, error) {
 	out := make([]ModelUsageRow, 0)
 	for rows.Next() {
 		var r ModelUsageRow
-		if err := rows.Scan(&r.Model, &r.Requests, &r.TotalTokens, &r.Credits, &r.AvgDurationMs); err != nil {
+		if err := rows.Scan(&r.Model, &r.Requests, &r.TotalTokens, &r.Credits, &r.AvgDurationMs,
+			&r.PromptTokens, &r.CompletionTokens, &r.TokPerSec, &r.P50DurationMs, &r.P95DurationMs,
+			&r.ErrorCount, &r.PartialCount); err != nil {
 			return nil, fmt.Errorf("scan model row: %w", err)
 		}
 		out = append(out, r)

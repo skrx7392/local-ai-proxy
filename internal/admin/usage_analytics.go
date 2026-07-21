@@ -26,11 +26,18 @@ type usageSummaryDTO struct {
 }
 
 type modelUsageDTO struct {
-	Model         string  `json:"model"`
-	Requests      int     `json:"requests"`
-	TotalTokens   int     `json:"total_tokens"`
-	Credits       float64 `json:"credits"`
-	AvgDurationMs float64 `json:"avg_duration_ms"`
+	Model            string   `json:"model"`
+	Requests         int      `json:"requests"`
+	TotalTokens      int      `json:"total_tokens"`
+	Credits          float64  `json:"credits"`
+	AvgDurationMs    float64  `json:"avg_duration_ms"`
+	PromptTokens     int      `json:"prompt_tokens"`
+	CompletionTokens int      `json:"completion_tokens"`
+	TokPerSec        *float64 `json:"tok_per_sec"`
+	P50DurationMs    *float64 `json:"p50_duration_ms"`
+	P95DurationMs    *float64 `json:"p95_duration_ms"`
+	ErrorCount       int      `json:"error_count"`
+	PartialCount     int      `json:"partial_count"`
 }
 
 type ownerUsageDTO struct {
@@ -296,11 +303,18 @@ func (h *handler) getUsageByModel(w http.ResponseWriter, r *http.Request) {
 	dtos := make([]modelUsageDTO, len(rows))
 	for i, r := range rows {
 		dtos[i] = modelUsageDTO{
-			Model:         r.Model,
-			Requests:      r.Requests,
-			TotalTokens:   r.TotalTokens,
-			Credits:       r.Credits,
-			AvgDurationMs: r.AvgDurationMs,
+			Model:            r.Model,
+			Requests:         r.Requests,
+			TotalTokens:      r.TotalTokens,
+			Credits:          r.Credits,
+			AvgDurationMs:    r.AvgDurationMs,
+			PromptTokens:     r.PromptTokens,
+			CompletionTokens: r.CompletionTokens,
+			TokPerSec:        r.TokPerSec,
+			P50DurationMs:    r.P50DurationMs,
+			P95DurationMs:    r.P95DurationMs,
+			ErrorCount:       r.ErrorCount,
+			PartialCount:     r.PartialCount,
 		}
 	}
 	page, pag := sliceWindow(dtos, limit, offset)
