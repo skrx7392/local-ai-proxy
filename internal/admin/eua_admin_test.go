@@ -143,3 +143,52 @@ func TestAdmin_ListAccounts_IncludesAllowanceFields(t *testing.T) {
 		t.Errorf("expected federated email, got %v", row.Email)
 	}
 }
+
+func TestAdmin_SetAccountAllowance_AbsentFieldRejected(t *testing.T) {
+	h, s := setupAdminTest(t)
+	res, err := s.ResolveEndUserAccount(store.FederatedIdentity{
+		Source: "openwebui", ExternalID: "admin-eua-3", Email: "absent@example.com",
+	}, 5.0, time.Now())
+	if err != nil {
+		t.Fatalf("ResolveEndUserAccount: %v", err)
+	}
+	override := 42.0
+	if err := s.SetMonthlyGrant(res.AccountID, &override); err != nil {
+		t.Fatalf("SetMonthlyGrant: %v", err)
+	}
+
+	// {} must NOT silently clear the override (null is the explicit clear).
+	rec := adminPut(t, h, "/api/admin/accounts/"+strconv.FormatInt(res.AccountID, 10)+"/allowance", `{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("absent field: expected 400, got %d", rec.Code)
+	}
+	var grant *float64
+	_ = s.Pool().QueryRow(t.Context(), `SELECT monthly_grant FROM accounts WHERE id=$1`, res.AccountID).Scan(&grant)
+	if grant == nil || *grant != 42.0 {
+		t.Errorf("override must survive a rejected request, got %v", grant)
+	}
+}
+
+func TestAdmin_KeyReads_SurfaceTrustFlag(t *testing.T) {
+	h, s := setupAdminTest(t)
+	keyID, err := s.CreateKey("openwebui", "hash-trust-read", "laip_tr2", 60)
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	if err := s.SetTrustUserHeaders(keyID, true); err != nil {
+		t.Fatalf("SetTrustUserHeaders: %v", err)
+	}
+
+	for _, path := range []string{"/api/admin/keys?envelope=0", "/api/admin/keys/" + strconv.FormatInt(keyID, 10)} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-Admin-Key", testAdminKey)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"trust_user_headers":true`) {
+			t.Errorf("%s: response must surface trust_user_headers=true: %s", path, rec.Body.String()[:200])
+		}
+	}
+}

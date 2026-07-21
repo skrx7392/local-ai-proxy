@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 )
@@ -125,8 +126,11 @@ func Load() (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("invalid END_USER_MONTHLY_GRANT: %w", err)
 		}
-		if n < 0 {
-			return Config{}, fmt.Errorf("invalid END_USER_MONTHLY_GRANT: must be >= 0, got %v", n)
+		// NaN poisons every downstream comparison (NaN comparisons are all
+		// false → the credit gate and reserve check never trip → unlimited
+		// spend); infinity is the same defect spelled differently.
+		if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 {
+			return Config{}, fmt.Errorf("invalid END_USER_MONTHLY_GRANT: must be a finite value >= 0, got %v", n)
 		}
 		endUserMonthlyGrant = n
 	}

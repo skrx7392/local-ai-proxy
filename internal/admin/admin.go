@@ -135,7 +135,8 @@ type keyResponse struct {
 	// LastUsedAt is the most recent request time derived from usage_logs,
 	// RFC3339-formatted. nil (JSON null) means the key has never served a
 	// request — the FE renders that as "Never".
-	LastUsedAt *string `json:"last_used_at"`
+	LastUsedAt       *string `json:"last_used_at"`
+	TrustUserHeaders bool    `json:"trust_user_headers"`
 }
 
 func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.UsageEntry, opts Options) http.Handler {
@@ -421,13 +422,14 @@ func (h *handler) listKeys(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		resp = append(resp, keyResponse{
-			ID:         apiKey.ID,
-			Name:       apiKey.Name,
-			KeyPrefix:  apiKey.KeyPrefix,
-			RateLimit:  apiKey.RateLimit,
-			CreatedAt:  apiKey.CreatedAt,
-			Revoked:    apiKey.Revoked,
-			LastUsedAt: formatRFC3339Ptr(apiKey.LastUsedAt),
+			ID:               apiKey.ID,
+			Name:             apiKey.Name,
+			KeyPrefix:        apiKey.KeyPrefix,
+			RateLimit:        apiKey.RateLimit,
+			CreatedAt:        apiKey.CreatedAt,
+			Revoked:          apiKey.Revoked,
+			LastUsedAt:       formatRFC3339Ptr(apiKey.LastUsedAt),
+			TrustUserHeaders: apiKey.TrustUserHeaders,
 		})
 	}
 
@@ -1118,18 +1120,30 @@ func (h *handler) setAccountAllowance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// json.RawMessage distinguishes an ABSENT field from explicit null:
+	// null is the destructive "clear the override" operation, so it must be
+	// spelled out — {} is a 400, never a silent clear.
 	var req struct {
-		MonthlyGrant *float64 `json:"monthly_grant"` // null = revert to env default
+		MonthlyGrant json.RawMessage `json:"monthly_grant"`
 	}
 	if !apierror.DecodeJSON(w, r, &req) {
 		return
 	}
-	if req.MonthlyGrant != nil && *req.MonthlyGrant < 0 {
+	if len(req.MonthlyGrant) == 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_field", "invalid_request_error", "monthly_grant is required (number to set, null to clear)")
+		return
+	}
+	var grant *float64
+	if err := json.Unmarshal(req.MonthlyGrant, &grant); err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_amount", "invalid_request_error", "monthly_grant must be a number or null")
+		return
+	}
+	if grant != nil && *grant < 0 {
 		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_amount", "invalid_request_error", "monthly_grant must be >= 0")
 		return
 	}
 
-	if err := h.store.SetMonthlyGrant(accountID, req.MonthlyGrant); err != nil {
+	if err := h.store.SetMonthlyGrant(accountID, grant); err != nil {
 		if err.Error() == "account not found" {
 			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Account not found")
 			return
@@ -1140,7 +1154,7 @@ func (h *handler) setAccountAllowance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"status": "updated", "monthly_grant": req.MonthlyGrant})
+	json.NewEncoder(w).Encode(map[string]any{"status": "updated", "monthly_grant": grant})
 }
 
 func min(a, b float64) float64 {
@@ -1249,6 +1263,7 @@ type keyDetailDTO struct {
 	SessionTokenLimit *int    `json:"session_token_limit"`
 	CreatedAt         string  `json:"created_at"`
 	LastUsedAt        *string `json:"last_used_at"`
+	TrustUserHeaders  bool    `json:"trust_user_headers"`
 }
 
 func toKeyDetailDTO(k *store.APIKey) keyDetailDTO {
@@ -1263,6 +1278,7 @@ func toKeyDetailDTO(k *store.APIKey) keyDetailDTO {
 		SessionTokenLimit: k.SessionTokenLimit,
 		CreatedAt:         k.CreatedAt.Format(time.RFC3339),
 		LastUsedAt:        formatRFC3339Ptr(k.LastUsedAt),
+		TrustUserHeaders:  k.TrustUserHeaders,
 	}
 }
 
