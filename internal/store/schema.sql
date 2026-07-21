@@ -256,3 +256,62 @@ UPDATE credit_pricing SET prompt_rate_mtok = prompt_rate * 1000000
     WHERE prompt_rate_mtok IS NULL;
 UPDATE credit_pricing SET completion_rate_mtok = completion_rate * 1000000
     WHERE completion_rate_mtok IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- End-user accounts (docs/design/end-user-accounts.md): per-user attribution
+-- and monthly allowance for identities forwarded on trusted keys.
+
+-- Only the admin API may set this; a key with the flag bills the end-user
+-- account resolved from X-OpenWebUI-User-Id instead of its own account.
+DO $$ BEGIN
+    ALTER TABLE api_keys ADD COLUMN trust_user_headers BOOLEAN NOT NULL DEFAULT FALSE;
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+-- allowance_managed marks auto-provisioned end-user accounts: only these get
+-- the monthly balance reset. monthly_grant NULL = use the env default
+-- (END_USER_MONTHLY_GRANT); explicit 0 = blocked.
+DO $$ BEGIN
+    ALTER TABLE accounts ADD COLUMN allowance_managed BOOLEAN NOT NULL DEFAULT FALSE;
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+DO $$ BEGIN
+    ALTER TABLE accounts ADD COLUMN monthly_grant DECIMAL(15,6);
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+-- First day (UTC) of the month the allowance was last granted for.
+DO $$ BEGIN
+    ALTER TABLE credit_balances ADD COLUMN allowance_period DATE;
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+-- Identity authority is (source, external_id) — email is display metadata and
+-- may change without moving the account.
+CREATE TABLE IF NOT EXISTS federated_identities (
+    id           BIGSERIAL PRIMARY KEY,
+    source       TEXT NOT NULL,
+    external_id  TEXT NOT NULL,
+    account_id   BIGINT NOT NULL REFERENCES accounts(id),
+    email        TEXT,
+    display_name TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source, external_id)
+);
+
+-- Billing-account attribution on usage rows (NULL = pre-feature history;
+-- analytics COALESCE through the api_keys join for those).
+DO $$ BEGIN
+    ALTER TABLE usage_logs ADD COLUMN account_id BIGINT REFERENCES accounts(id);
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_usage_logs_account_created
+    ON usage_logs(account_id, created_at);
