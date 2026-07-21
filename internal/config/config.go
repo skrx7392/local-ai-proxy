@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"strconv"
 )
@@ -49,6 +50,12 @@ type Config struct {
 	// per account via accounts.monthly_grant. See
 	// docs/design/end-user-accounts.md.
 	EndUserMonthlyGrant float64
+
+	// CreditAlertWebhookURL (CREDIT_ALERT_WEBHOOK_URL, optional) receives a
+	// POST when an end-user account hits its monthly allowance
+	// (docs/design/credit-requests.md). Empty = notifications disabled;
+	// cap-hits are still recorded in credit_requests.
+	CreditAlertWebhookURL string
 
 	// Public auth-surface rate limits (requests per minute) and the global
 	// bcrypt concurrency cap. See internal/authlimit.
@@ -177,6 +184,19 @@ func Load() (Config, error) {
 		modelsListAll = b
 	}
 
+	// A malformed webhook URL would fail silently on every cap-hit, so
+	// reject it at boot instead of at notification time.
+	creditAlertWebhookURL := os.Getenv("CREDIT_ALERT_WEBHOOK_URL")
+	if creditAlertWebhookURL != "" {
+		u, err := url.Parse(creditAlertWebhookURL)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid CREDIT_ALERT_WEBHOOK_URL: %w", err)
+		}
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return Config{}, fmt.Errorf("invalid CREDIT_ALERT_WEBHOOK_URL: must be an absolute http(s) URL, got %q", creditAlertWebhookURL)
+		}
+	}
+
 	return Config{
 		OllamaURL:           ollamaURL,
 		OllamaURLSet:        ollamaExplicit,
@@ -194,6 +214,7 @@ func Load() (Config, error) {
 
 		AdminServiceCreditGrant: adminServiceCreditGrant,
 		EndUserMonthlyGrant:     endUserMonthlyGrant,
+		CreditAlertWebhookURL:   creditAlertWebhookURL,
 
 		AuthLoginPerMinIP:     authLoginIP,
 		AuthLoginPerMinEmail:  authLoginEmail,

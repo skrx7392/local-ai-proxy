@@ -325,3 +325,27 @@ CREATE INDEX IF NOT EXISTS idx_federated_identities_account
 -- per-account owning-user email lookup filters users on account_id.
 CREATE INDEX IF NOT EXISTS idx_users_account
     ON users(account_id, id);
+
+-- ---------------------------------------------------------------------------
+-- Credit requests (docs/design/credit-requests.md): auto-filed on the first
+-- monthly_limit_reached 402 of a cap-hit episode. Filing policy per
+-- (account, UTC month): a pending row dedupes, a dismissed row silences the
+-- rest of the month, granted rows allow re-filing (each episode gets one).
+
+CREATE TABLE IF NOT EXISTS credit_requests (
+    id            BIGSERIAL PRIMARY KEY,
+    account_id    BIGINT NOT NULL REFERENCES accounts(id),
+    period        DATE NOT NULL,      -- first day of the UTC month, like allowance_period
+    status        TEXT NOT NULL DEFAULT 'pending',  -- pending | granted | dismissed
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at   TIMESTAMPTZ,
+    resolved_note TEXT
+);
+
+-- Race-safety for concurrent 402s: only one pending row can exist per
+-- account+month, so the losing inserter's ON CONFLICT no-ops.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_requests_pending
+    ON credit_requests(account_id, period) WHERE status = 'pending';
+
+CREATE INDEX IF NOT EXISTS idx_credit_requests_status
+    ON credit_requests(status, created_at);

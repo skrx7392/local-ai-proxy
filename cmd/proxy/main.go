@@ -18,6 +18,7 @@ import (
 	"github.com/krishna/local-ai-proxy/internal/billing"
 	"github.com/krishna/local-ai-proxy/internal/bootstrap"
 	"github.com/krishna/local-ai-proxy/internal/config"
+	"github.com/krishna/local-ai-proxy/internal/creditrequest"
 	"github.com/krishna/local-ai-proxy/internal/credits"
 	"github.com/krishna/local-ai-proxy/internal/health"
 	"github.com/krishna/local-ai-proxy/internal/logging"
@@ -207,11 +208,12 @@ func main() {
 	}
 
 	limiter := ratelimit.New()
+	capHits := creditrequest.New(db, cfg.CreditAlertWebhookURL, cfg.EndUserMonthlyGrant)
 	proxyHandler := proxy.NewHandler(reg, usageCh, cfg.MaxRequestBody, db, m,
-		proxy.Options{ModelsListAll: cfg.ModelsListAll})
+		proxy.Options{ModelsListAll: cfg.ModelsListAll, CapHits: capHits})
 	authMiddleware := auth.Middleware(db)
 	billingResolver := billing.Middleware(db, cfg.EndUserMonthlyGrant)
-	creditGate := credits.CreditGate(db, m)
+	creditGate := credits.CreditGate(db, m, capHits)
 	rateLimitMiddleware := ratelimit.Middleware(limiter, m)
 	cors := middleware.CORS(cfg.CORSOrigins)
 
@@ -268,6 +270,7 @@ func main() {
 		Refresher: nodePoller,
 
 		AdminServiceCreditGrant: cfg.AdminServiceCreditGrant,
+		EndUserMonthlyGrant:     cfg.EndUserMonthlyGrant,
 	})
 	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken, m)
 	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant, m, authGuard)
@@ -344,6 +347,10 @@ func main() {
 	writerCancel()
 	close(usageCh)
 	<-writerDone
+
+	// Drain in-flight cap-hit recordings (filed rows + webhook deliveries)
+	// before the deferred db.Close tears the pool down under them.
+	capHits.Wait()
 
 	slog.Info("shutdown complete")
 }

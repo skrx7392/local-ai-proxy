@@ -42,6 +42,7 @@ func setupUserMetricsTest(t *testing.T) (http.Handler, *store.Store, *metrics.Me
 		_, _ = s.Pool().Exec(c, "DELETE FROM api_keys")
 		_, _ = s.Pool().Exec(c, "DELETE FROM users")
 		_, _ = s.Pool().Exec(c, "DELETE FROM federated_identities")
+		_, _ = s.Pool().Exec(c, "DELETE FROM credit_requests")
 		_, _ = s.Pool().Exec(c, "DELETE FROM accounts")
 	}
 	wipe()

@@ -39,6 +39,7 @@ func setupTestStore(t *testing.T) *store.Store {
 		_, _ = pool.Exec(c, "DELETE FROM api_keys")
 		_, _ = pool.Exec(c, "DELETE FROM users")
 		_, _ = pool.Exec(c, "DELETE FROM federated_identities")
+		_, _ = pool.Exec(c, "DELETE FROM credit_requests")
 		_, _ = pool.Exec(c, "DELETE FROM accounts")
 	}
 	wipe()
@@ -55,7 +56,7 @@ func TestCreditGate_ErrorResponseFormat(t *testing.T) {
 	db := setupTestStore(t)
 	accID, _, _ := db.RegisterUser("gate-format@example.com", "hash", "GateFormat")
 	// No credits — will get 402
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called")
@@ -80,7 +81,7 @@ func TestCreditGate_NilAccountID_Returns403(t *testing.T) {
 	// rejected, never waved through. Startup backfill guarantees this state
 	// cannot occur in a healthy deployment, so rejecting is fail-closed.
 	db := setupTestStore(t)
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called for nil AccountID")
@@ -107,7 +108,7 @@ func TestCreditGate_LegacyAdminKey_UpgradePath(t *testing.T) {
 	// startup backfill it must chat again — attached to the admin service
 	// account, metered like every other key.
 	db := setupTestStore(t)
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 
 	rawHash := "legacy-hash-upgrade"
 	if _, err := db.CreateKey("legacy-admin", rawHash, "sk-legacy", 60); err != nil {
@@ -158,7 +159,7 @@ func TestCreditGate_SufficientBalance_PassesThrough(t *testing.T) {
 	db := setupTestStore(t)
 	accID, _, _ := db.RegisterUser("gate-pass@example.com", "hash", "GatePass")
 	_ = db.AddCredits(accID, 100, "grant")
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 
 	called := false
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +182,7 @@ func TestCreditGate_ZeroBalance_Returns402(t *testing.T) {
 	db := setupTestStore(t)
 	accID, _, _ := db.RegisterUser("gate-zero@example.com", "hash", "GateZero")
 	// No credits added — balance is 0
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called")
@@ -200,7 +201,7 @@ func TestCreditGate_ZeroBalance_Returns402(t *testing.T) {
 
 func TestCreditGate_NoKey_PassesThrough(t *testing.T) {
 	db := setupTestStore(t)
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 
 	called := false
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +224,7 @@ func TestCreditGate_InactiveAccount_Returns403(t *testing.T) {
 	accID, _, _ := db.RegisterUser("gate-inactive@example.com", "hash", "GateInactive")
 	_ = db.AddCredits(accID, 100, "grant")
 	_ = db.SetAccountActive(accID, false)
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called")

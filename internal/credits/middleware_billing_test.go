@@ -27,7 +27,7 @@ func TestCreditGate_ResolvedBillingAccount_OverridesKeyAccount(t *testing.T) {
 		t.Fatalf("ResolveEndUserAccount: %v", err)
 	}
 
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 	called := false
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -60,7 +60,7 @@ func TestCreditGate_AllowanceExhausted_MonthlyLimitWording(t *testing.T) {
 		t.Fatalf("ResolveEndUserAccount: %v", err)
 	}
 
-	gate := CreditGate(db, nil)
+	gate := CreditGate(db, nil, nil)
 	handler := gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler must not be called for an exhausted allowance")
 	}))
