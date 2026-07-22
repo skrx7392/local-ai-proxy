@@ -207,14 +207,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	limiter := ratelimit.New()
+	// Two limiter instances, deliberately separate: key IDs and account IDs
+	// share the int64 space, so one map would collide key #7 with account #7
+	// (docs/design/per-account-rate-limiting.md §3.1).
+	keyLimiter := ratelimit.New()
+	accountLimiter := ratelimit.New()
 	capHits := creditrequest.New(db, cfg.CreditAlertWebhookURL, cfg.EndUserMonthlyGrant)
 	proxyHandler := proxy.NewHandler(reg, usageCh, cfg.MaxRequestBody, db, m,
 		proxy.Options{ModelsListAll: cfg.ModelsListAll, CapHits: capHits})
 	authMiddleware := auth.Middleware(db)
 	billingResolver := billing.Middleware(db, cfg.EndUserMonthlyGrant)
 	creditGate := credits.CreditGate(db, m, capHits)
-	rateLimitMiddleware := ratelimit.Middleware(limiter, m)
+	rateLimitMiddleware := ratelimit.Middleware(keyLimiter, accountLimiter, ratelimit.Limits{
+		EndUserPerMin: cfg.EndUserRateLimitPerMin,
+		ServicePerMin: cfg.AccountRateLimitPerMin,
+	}, m)
 	cors := middleware.CORS(cfg.CORSOrigins)
 
 	// Brute-force / bcrypt-DoS protection for the public auth surface.
@@ -251,6 +258,8 @@ func main() {
 		AuthRegisterRateLimitPerMinute:   cfg.AuthRegisterPerMinIP,
 		AuthGeneralRateLimitPerMinute:    cfg.AuthGeneralPerMinIP,
 		AuthBcryptMaxConcurrent:          cfg.AuthBcryptConcurrency,
+		AccountRateLimitPerMinute:        cfg.AccountRateLimitPerMin,
+		EndUserRateLimitPerMinute:        cfg.EndUserRateLimitPerMin,
 		UsageChannelCapacity:             usageChannelCapacity,
 		AdminSessionDurationHrs:          int(user.AdminSessionDuration / time.Hour),
 		UserSessionDurationHrs:           int(user.UserSessionDuration / time.Hour),
@@ -271,6 +280,8 @@ func main() {
 
 		AdminServiceCreditGrant: cfg.AdminServiceCreditGrant,
 		EndUserMonthlyGrant:     cfg.EndUserMonthlyGrant,
+		AccountRateLimitPerMin:  cfg.AccountRateLimitPerMin,
+		EndUserRateLimitPerMin:  cfg.EndUserRateLimitPerMin,
 	})
 	bootstrapHandler := bootstrap.New(db, cfg.AdminBootstrapToken, m)
 	userHandler := user.NewHandler(db, cfg.DefaultCreditGrant, m, authGuard)
@@ -282,11 +293,15 @@ func main() {
 	mux.HandleFunc("GET /api/healthz/ready", hc.ReadyHandler)
 	mux.HandleFunc("GET /api/healthz", hc.LiveHandler) // backward compat alias
 
-	// Client API — CORS + auth + billing resolution + credit gate + rate limit
-	// + proxy (instrumented). Billing MUST precede the credit gate: the gate
-	// pre-checks the resolved billing account, not the key's own account
-	// (docs/design/end-user-accounts.md §4).
-	mux.Handle("/api/v1/", m.InstrumentHandler(cors(authMiddleware(billingResolver(creditGate(rateLimitMiddleware(proxyHandler)))))))
+	// Client API — CORS + auth + billing resolution + rate limit + credit
+	// gate + proxy (instrumented). Billing MUST precede both gates: they act
+	// on the resolved billing account, not the key's own account
+	// (docs/design/end-user-accounts.md §4). Rate limit precedes the credit
+	// gate so 402-spam cannot drive unthrottled per-request credit-status
+	// queries; consequence: an over-cap AND over-rate account sees 429, and
+	// cap-hit recording (the credit-request trigger) fires on its first
+	// rate-passing request (docs/design/per-account-rate-limiting.md §3.3).
+	mux.Handle("/api/v1/", m.InstrumentHandler(cors(authMiddleware(billingResolver(rateLimitMiddleware(creditGate(proxyHandler)))))))
 
 	// Metrics endpoint — unauthenticated, cluster-internal only
 	mux.Handle("GET /metrics", m.Handler())

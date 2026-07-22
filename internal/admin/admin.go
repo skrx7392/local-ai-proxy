@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -67,6 +68,10 @@ type handler struct {
 	// Env-default monthly allowance, used to resolve each account's
 	// effective grant server-side (accounts + credit-requests listings).
 	endUserMonthlyGrant float64
+
+	// Class-default account rate limits, used to resolve each account's
+	// effective_rate_limit_per_min server-side (accounts listing).
+	rateLimits ratelimit.Limits
 }
 
 // NodeSnapshotter exposes the node registry's current routing state.
@@ -103,6 +108,11 @@ type Options struct {
 	// Env-default monthly allowance (cfg.EndUserMonthlyGrant); see
 	// handler.endUserMonthlyGrant.
 	EndUserMonthlyGrant float64
+
+	// Class-default account rate limits (cfg.AccountRateLimitPerMin /
+	// cfg.EndUserRateLimitPerMin); see handler.rateLimits.
+	AccountRateLimitPerMin int
+	EndUserRateLimitPerMin int
 }
 
 type adminSessionCtxKey struct{}
@@ -164,6 +174,10 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 
 		adminServiceCreditGrant: opts.AdminServiceCreditGrant,
 		endUserMonthlyGrant:     opts.EndUserMonthlyGrant,
+		rateLimits: ratelimit.Limits{
+			EndUserPerMin: opts.EndUserRateLimitPerMin,
+			ServicePerMin: opts.AccountRateLimitPerMin,
+		},
 	}
 
 	mux := http.NewServeMux()
@@ -195,6 +209,7 @@ func NewHandler(dataStore *store.Store, adminKey string, usageCh chan<- store.Us
 	mux.HandleFunc("POST /api/admin/accounts/{id}/credits", handler.grantCredits)
 	mux.HandleFunc("POST /api/admin/accounts/{id}/keys", handler.createAccountKey)
 	mux.HandleFunc("PUT /api/admin/accounts/{id}/allowance", handler.setAccountAllowance)
+	mux.HandleFunc("PUT /api/admin/accounts/{id}/rate-limit", handler.setAccountRateLimit)
 
 	// Credit requests (docs/design/credit-requests.md).
 	mux.HandleFunc("GET /api/admin/credit-requests", handler.listCreditRequests)
@@ -705,6 +720,10 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		// default server-side; null for non-allowance-managed accounts.
 		EffectiveMonthlyGrant *float64 `json:"effective_monthly_grant"`
 		Email                 *string  `json:"email"`
+		RateLimitPerMin       *int     `json:"rate_limit_per_min"`
+		// EffectiveRateLimitPerMin resolves the override against the class
+		// env default server-side (never null — every account has a limit).
+		EffectiveRateLimitPerMin int `json:"effective_rate_limit_per_min"`
 	}
 
 	resp := make([]accountResponse, 0, len(accounts))
@@ -724,18 +743,20 @@ func (h *handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 			effectiveGrant = &g
 		}
 		resp = append(resp, accountResponse{
-			ID:                    a.ID,
-			Name:                  a.Name,
-			Type:                  a.Type,
-			IsActive:              a.IsActive,
-			Balance:               a.Balance,
-			Reserved:              a.Reserved,
-			Available:             a.Balance - a.Reserved,
-			CreatedAt:             a.CreatedAt.Format(time.RFC3339),
-			AllowanceManaged:      a.AllowanceManaged,
-			MonthlyGrant:          a.MonthlyGrant,
-			EffectiveMonthlyGrant: effectiveGrant,
-			Email:                 a.FederatedEmail,
+			ID:                       a.ID,
+			Name:                     a.Name,
+			Type:                     a.Type,
+			IsActive:                 a.IsActive,
+			Balance:                  a.Balance,
+			Reserved:                 a.Reserved,
+			Available:                a.Balance - a.Reserved,
+			CreatedAt:                a.CreatedAt.Format(time.RFC3339),
+			AllowanceManaged:         a.AllowanceManaged,
+			MonthlyGrant:             a.MonthlyGrant,
+			EffectiveMonthlyGrant:    effectiveGrant,
+			Email:                    a.FederatedEmail,
+			RateLimitPerMin:          a.RateLimitPerMin,
+			EffectiveRateLimitPerMin: ratelimit.EffectiveLimit(a.RateLimitPerMin, a.AllowanceManaged, h.rateLimits),
 		})
 	}
 
@@ -1182,6 +1203,56 @@ func (h *handler) setAccountAllowance(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"status": "updated", "monthly_grant": grant})
+}
+
+// setAccountRateLimit sets (value) or clears (null → class env default) an
+// account's per-minute rate-limit override. Takes effect on the account's
+// next request (docs/design/per-account-rate-limiting.md §4.3).
+func (h *handler) setAccountRateLimit(w http.ResponseWriter, r *http.Request) {
+	accountID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_id", "invalid_request_error", "Invalid account ID")
+		return
+	}
+
+	// json.RawMessage distinguishes an ABSENT field from explicit null:
+	// null is the destructive "clear the override" operation, so it must be
+	// spelled out — {} is a 400, never a silent clear.
+	var req struct {
+		RateLimitPerMin json.RawMessage `json:"rate_limit_per_min"`
+	}
+	if !apierror.DecodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.RateLimitPerMin) == 0 {
+		proxy.WriteError(w, r, http.StatusBadRequest, "missing_field", "invalid_request_error", "rate_limit_per_min is required (integer to set, null to clear)")
+		return
+	}
+	var perMin *int
+	if err := json.Unmarshal(req.RateLimitPerMin, &perMin); err != nil {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_rate_limit", "invalid_request_error", "rate_limit_per_min must be an integer or null")
+		return
+	}
+	// Explicit 0 is rejected: blocking is the job of credits and account
+	// deactivation (403), not a 429 that SDKs politely retry forever.
+	if perMin != nil && (*perMin < 1 || *perMin > ratelimit.MaxConfigPerMinute) {
+		proxy.WriteError(w, r, http.StatusBadRequest, "invalid_rate_limit", "invalid_request_error",
+			fmt.Sprintf("rate_limit_per_min must be between 1 and %d", ratelimit.MaxConfigPerMinute))
+		return
+	}
+
+	if err := h.store.SetAccountRateLimit(accountID, perMin); err != nil {
+		if err.Error() == "account not found" {
+			proxy.WriteError(w, r, http.StatusNotFound, "not_found", "invalid_request_error", "Account not found")
+			return
+		}
+		slog.ErrorContext(r.Context(), "set account rate limit error", "error", err, "account_id", accountID)
+		proxy.WriteError(w, r, http.StatusInternalServerError, "internal_error", "server_error", "Failed to set rate limit")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "updated", "rate_limit_per_min": perMin})
 }
 
 func min(a, b float64) float64 {

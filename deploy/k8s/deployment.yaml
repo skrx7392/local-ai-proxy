@@ -58,6 +58,17 @@ spec:
             # recorded in credit_requests either way.
             - name: CREDIT_ALERT_WEBHOOK_URL
               value: "http://openwebui-discord-bot.openwebui.svc.cluster.local:8080/credit-request"
+            # Account-level rate limits (docs/design/per-account-rate-limiting.md).
+            # Per-account override: accounts.rate_limit_per_min via
+            # PUT /api/admin/accounts/{id}/rate-limit. Runbook: the shared
+            # Open WebUI key's per-key limit (120/min) is the aggregate
+            # ceiling — raise it via PUT /api/admin/keys/{id}/rate-limit as
+            # headcount grows (>4 concurrently active users at 30/min each
+            # will collectively starve at 120/min).
+            - name: ACCOUNT_RATELIMIT_PER_MIN
+              value: "300"
+            - name: END_USER_RATELIMIT_PER_MIN
+              value: "30"
           livenessProbe:
             httpGet:
               path: /api/healthz/live

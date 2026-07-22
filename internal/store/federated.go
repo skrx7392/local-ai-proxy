@@ -23,6 +23,10 @@ type EndUserResolution struct {
 	AccountID        int64
 	Provisioned      bool // account was created by this call
 	AllowanceGranted bool // monthly allowance was applied by this call
+	// RateLimitPerMin is the account's rate_limit_per_min override; nil =
+	// class env default. Carried out of the per-request accounts SELECT so
+	// the rate limiter needs no extra query.
+	RateLimitPerMin *int
 }
 
 // accountName picks the display name for an auto-provisioned account:
@@ -62,7 +66,7 @@ func (s *Store) ResolveEndUserAccount(id FederatedIdentity, defaultGrant float64
 	}
 	res.AccountID = accountID
 
-	res.AllowanceGranted, err = s.applyMonthlyAllowance(ctx, accountID, defaultGrant, now)
+	res.AllowanceGranted, res.RateLimitPerMin, err = s.applyMonthlyAllowance(ctx, accountID, defaultGrant, now)
 	if err != nil {
 		return res, err
 	}
@@ -160,18 +164,21 @@ func (s *Store) provisionFederatedAccount(ctx context.Context, id FederatedIdent
 // winner under concurrency; the reset (not +=) is what makes the grant a
 // monthly spend cap — unspent allowance does not roll over. In-flight holds
 // (reserved) are deliberately untouched.
-func (s *Store) applyMonthlyAllowance(ctx context.Context, accountID int64, defaultGrant float64, now time.Time) (bool, error) {
+// It also carries out the account's rate_limit_per_min override — the SELECT
+// here runs per-request anyway, so the rate limiter gets its input for free.
+func (s *Store) applyMonthlyAllowance(ctx context.Context, accountID int64, defaultGrant float64, now time.Time) (bool, *int, error) {
 	var managed bool
 	var override *float64
+	var ratePerMin *int
 	err := s.pool.QueryRow(ctx,
-		`SELECT allowance_managed, monthly_grant FROM accounts WHERE id = $1`,
+		`SELECT allowance_managed, monthly_grant, rate_limit_per_min FROM accounts WHERE id = $1`,
 		accountID,
-	).Scan(&managed, &override)
+	).Scan(&managed, &override, &ratePerMin)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if !managed {
-		return false, nil
+		return false, ratePerMin, nil
 	}
 	grant := defaultGrant
 	if override != nil {
@@ -181,7 +188,7 @@ func (s *Store) applyMonthlyAllowance(ctx context.Context, accountID int64, defa
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, err
+		return false, ratePerMin, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -193,22 +200,22 @@ func (s *Store) applyMonthlyAllowance(ctx context.Context, accountID int64, defa
 		accountID, grant, month,
 	)
 	if err != nil {
-		return false, err
+		return false, ratePerMin, err
 	}
 	if ct.RowsAffected() == 0 {
-		return false, nil // already granted this month (possibly by a concurrent request)
+		return false, ratePerMin, nil // already granted this month (possibly by a concurrent request)
 	}
 	if _, err = tx.Exec(ctx,
 		`INSERT INTO credit_transactions (account_id, amount, balance_after, type, description)
 		 VALUES ($1, $2, $2, 'monthly_allowance', $3)`,
 		accountID, grant, fmt.Sprintf("monthly allowance %s", month.Format("2006-01")),
 	); err != nil {
-		return false, err
+		return false, ratePerMin, err
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return false, err
+		return false, ratePerMin, err
 	}
-	return true, nil
+	return true, ratePerMin, nil
 }
 
 // SetMonthlyGrant sets (or, with nil, clears back to the env default) an
@@ -218,6 +225,23 @@ func (s *Store) SetMonthlyGrant(accountID int64, grant *float64) error {
 	ct, err := s.pool.Exec(context.Background(),
 		`UPDATE accounts SET monthly_grant = $2 WHERE id = $1`,
 		accountID, grant,
+	)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("account not found")
+	}
+	return nil
+}
+
+// SetAccountRateLimit sets (or, with nil, clears back to the class env
+// default) an account's per-minute rate-limit override. Takes effect on the
+// account's next request (docs/design/per-account-rate-limiting.md §4.2).
+func (s *Store) SetAccountRateLimit(accountID int64, perMin *int) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE accounts SET rate_limit_per_min = $2 WHERE id = $1`,
+		accountID, perMin,
 	)
 	if err != nil {
 		return err

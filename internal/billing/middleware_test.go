@@ -146,6 +146,47 @@ func TestMiddleware_TrustedKeyNoHeaders_BillsKeyAccount(t *testing.T) {
 	}
 }
 
+// The rate limiter reads the per-account override off the Resolution — both
+// billing paths must thread it (docs/design/per-account-rate-limiting.md §4.2).
+func TestMiddleware_ThreadsRateLimitOverride_EndUser(t *testing.T) {
+	db := setupBillingTest(t)
+	sharedAcc, _, _ := db.RegisterUser("shared-rl@example.com", "hash", "SharedRL")
+	key := &store.APIKey{ID: 1, AccountID: &sharedAcc, TrustUserHeaders: true}
+
+	res, _ := serve(t, db, key, owuiHeaders())
+	if res == nil {
+		t.Fatal("expected a billing resolution")
+	}
+	if res.RateLimitPerMin != nil {
+		t.Errorf("fresh end-user account: expected nil override, got %v", *res.RateLimitPerMin)
+	}
+
+	perMin := 15
+	if err := db.SetAccountRateLimit(res.AccountID, &perMin); err != nil {
+		t.Fatalf("SetAccountRateLimit: %v", err)
+	}
+	res2, _ := serve(t, db, key, owuiHeaders())
+	if res2 == nil || res2.RateLimitPerMin == nil || *res2.RateLimitPerMin != 15 {
+		t.Errorf("expected override 15 on resolution, got %+v", res2)
+	}
+}
+
+func TestMiddleware_ThreadsRateLimitOverride_ServiceAccount(t *testing.T) {
+	db := setupBillingTest(t)
+	accID, _, _ := db.RegisterUser("svc-rl@example.com", "hash", "SvcRL")
+	perMin := 99
+	if err := db.SetAccountRateLimit(accID, &perMin); err != nil {
+		t.Fatalf("SetAccountRateLimit: %v", err)
+	}
+
+	// Service path reads the override off the key row (GetKeyByHash join).
+	key := &store.APIKey{ID: 1, AccountID: &accID, AccountRateLimitPerMin: &perMin}
+	res, _ := serve(t, db, key, nil)
+	if res == nil || res.RateLimitPerMin == nil || *res.RateLimitPerMin != 99 {
+		t.Errorf("expected override 99 on service resolution, got %+v", res)
+	}
+}
+
 func TestMiddleware_NoKey_PassesThroughWithoutResolution(t *testing.T) {
 	db := setupBillingTest(t)
 	res, rec := serve(t, db, nil, owuiHeaders())

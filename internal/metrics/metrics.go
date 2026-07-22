@@ -23,7 +23,11 @@ type Metrics struct {
 	// Credit/rate limit
 	CreditGateRejects prometheus.Counter
 	RateLimitRejects  prometheus.Counter
-	UsageDrops        prometheus.Counter
+	// Account-level limiter rejects (docs/design/per-account-rate-limiting.md).
+	// Partitions rejects with RateLimitRejects by gate: key-level rejects stay
+	// in the legacy counter, account-level ones land here.
+	AccountRateLimitRejects *prometheus.CounterVec // labels: kind (rate|concurrency), class (enduser|service)
+	UsageDrops              prometheus.Counter
 
 	// Infrastructure
 	OllamaUp prometheus.Gauge
@@ -88,8 +92,13 @@ func New(usageChLen func() int) *Metrics {
 
 		RateLimitRejects: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "aiproxy_ratelimit_rejects_total",
-			Help: "Requests rejected by rate limiter.",
+			Help: "Requests rejected by the key-level rate limiter. Account-level rejects are counted in aiproxy_account_ratelimit_rejects_total.",
 		}),
+
+		AccountRateLimitRejects: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "aiproxy_account_ratelimit_rejects_total",
+			Help: "Requests rejected by the account-level limiter, by kind (rate|concurrency) and account class (enduser|service).",
+		}, []string{"kind", "class"}),
 
 		UsageDrops: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "aiproxy_usage_drops_total",
@@ -144,6 +153,7 @@ func New(usageChLen func() int) *Metrics {
 		m.TokensTotal,
 		m.CreditGateRejects,
 		m.RateLimitRejects,
+		m.AccountRateLimitRejects,
 		m.UsageDrops,
 		m.OllamaUp,
 		m.NodeUp,
@@ -193,6 +203,16 @@ func (m *Metrics) RecordCreditGateReject() {
 		return
 	}
 	m.CreditGateRejects.Inc()
+}
+
+// RecordAccountRateLimitReject increments the account-level limiter reject
+// counter. Nil-safe. kind is "rate" or "concurrency"; class is "enduser" or
+// "service" — bounded vocabularies, never an account ID (cardinality rule).
+func (m *Metrics) RecordAccountRateLimitReject(kind, class string) {
+	if m == nil {
+		return
+	}
+	m.AccountRateLimitRejects.WithLabelValues(kind, class).Inc()
 }
 
 // RecordRateLimitReject increments the rate limit reject counter. Nil-safe.

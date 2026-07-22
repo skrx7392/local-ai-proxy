@@ -1,14 +1,22 @@
+// Package ratelimit provides the token-bucket rate limiting for the chat
+// proxy path: a key-level limiter (per api_keys.rate_limit) and an
+// account-level limiter keyed by the billing account
+// (docs/design/per-account-rate-limiting.md). The deployment is
+// single-replica, so in-memory buckets are sufficient; a shared/distributed
+// limiter is intentionally out of scope.
 package ratelimit
 
 import (
-	"fmt"
 	"math"
-	"net/http"
 	"sync"
 	"time"
+)
 
-	"github.com/krishna/local-ai-proxy/internal/auth"
-	"github.com/krishna/local-ai-proxy/internal/metrics"
+// pruneInterval is how often idle buckets are evicted; idleCutoff is the
+// minimum idle time before eviction (matches authlimit).
+const (
+	pruneInterval = 1 * time.Minute
+	idleCutoff    = 10 * time.Minute
 )
 
 type bucket struct {
@@ -19,19 +27,22 @@ type bucket struct {
 	lastAccess time.Time
 }
 
-// Limiter manages per-key token buckets.
+// Limiter manages token buckets keyed by int64 ID. The proxy runs two
+// instances — one keyed by API-key ID, one keyed by billing-account ID.
+// They must stay separate instances: the two ID spaces overlap, so a shared
+// map would collide key #7 with account #7.
 type Limiter struct {
 	mu      sync.Mutex
 	buckets map[int64]*bucket
+	nowFn   func() time.Time
 }
 
+// New builds a Limiter on the wall clock and starts the background prune
+// goroutine. Use this from main.
 func New() *Limiter {
-	limiter := &Limiter{
-		buckets: make(map[int64]*bucket),
-	}
-	// Prune stale buckets every minute
+	limiter := NewWithClock(time.Now)
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(pruneInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			limiter.prune()
@@ -40,14 +51,24 @@ func New() *Limiter {
 	return limiter
 }
 
-// Allow checks if a request is allowed for the given key ID and rate limit.
-// Returns (allowed, retryAfter in seconds).
-func (l *Limiter) Allow(keyID int64, rateLimit int) (bool, float64) {
+// NewWithClock builds a Limiter with an injectable clock and no prune
+// goroutine (the authlimit pattern). Exported for deterministic tests.
+func NewWithClock(nowFn func() time.Time) *Limiter {
+	return &Limiter{
+		buckets: make(map[int64]*bucket),
+		nowFn:   nowFn,
+	}
+}
+
+// Allow checks if a request is allowed for the given ID and rate limit.
+// Returns (allowed, retryAfter in seconds). Capacity and refill rate are
+// rewritten on every call, so limit changes apply on the next request.
+func (l *Limiter) Allow(id int64, rateLimit int) (bool, float64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	now := time.Now()
-	tokenBucket, exists := l.buckets[keyID]
+	now := l.nowFn()
+	tokenBucket, exists := l.buckets[id]
 
 	if !exists {
 		tokenBucket = &bucket{
@@ -57,7 +78,7 @@ func (l *Limiter) Allow(keyID int64, rateLimit int) (bool, float64) {
 			lastRefill: now,
 			lastAccess: now,
 		}
-		l.buckets[keyID] = tokenBucket
+		l.buckets[id] = tokenBucket
 		return true, 0
 	}
 
@@ -81,39 +102,29 @@ func (l *Limiter) Allow(keyID int64, rateLimit int) (bool, float64) {
 	return false, retryAfter
 }
 
+// Return refunds one token to id's bucket, clamped at capacity. Used when a
+// later gate rejects a request whose account bucket already charged it: on
+// the shared trusted key the key bucket (service key's aggregate) and the
+// account bucket (individual end user) have different owners, so an
+// aggregate rejection must not burn the individual's budget — and their
+// Retry-After must stay truthful. No-op for unknown IDs.
+func (l *Limiter) Return(id int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b, exists := l.buckets[id]
+	if !exists {
+		return
+	}
+	b.tokens = math.Min(b.capacity, b.tokens+1)
+}
+
 func (l *Limiter) prune() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	cutoff := time.Now().Add(-10 * time.Minute)
-	for keyID, tokenBucket := range l.buckets {
+	cutoff := l.nowFn().Add(-idleCutoff)
+	for id, tokenBucket := range l.buckets {
 		if tokenBucket.lastAccess.Before(cutoff) {
-			delete(l.buckets, keyID)
+			delete(l.buckets, id)
 		}
-	}
-}
-
-// Middleware returns HTTP middleware that enforces per-key rate limits.
-func Middleware(limiter *Limiter, m *metrics.Metrics) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			key := auth.KeyFromContext(r.Context())
-			if key == nil {
-				// No key in context means auth middleware didn't run (shouldn't happen)
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			allowed, retryAfter := limiter.Allow(key.ID, key.RateLimit)
-			if !allowed {
-				m.RecordRateLimitReject()
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", math.Ceil(retryAfter)))
-				w.WriteHeader(http.StatusTooManyRequests)
-				w.Write([]byte(`{"error":{"message":"Rate limit exceeded","type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}`))
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
 	}
 }
