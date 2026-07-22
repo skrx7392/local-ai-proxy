@@ -592,6 +592,7 @@ type AccountWithBalance struct {
 	AllowanceManaged bool
 	MonthlyGrant     *float64 // nil = env default applies
 	FederatedEmail   *string  // nil = no federated identity
+	RateLimitPerMin  *int     // nil = class env default applies
 }
 
 func (s *Store) ListAccountsWithBalances() ([]AccountWithBalance, error) {
@@ -599,7 +600,7 @@ func (s *Store) ListAccountsWithBalances() ([]AccountWithBalance, error) {
 		context.Background(),
 		`SELECT a.id, a.name, a.type, a.is_active, a.created_at,
 		        COALESCE(cb.balance, 0), COALESCE(cb.reserved, 0),
-		        a.allowance_managed, a.monthly_grant, fi.email
+		        a.allowance_managed, a.monthly_grant, fi.email, a.rate_limit_per_min
 		 FROM accounts a
 		 LEFT JOIN credit_balances cb ON cb.account_id = a.id
 		 LEFT JOIN LATERAL (
@@ -617,7 +618,7 @@ func (s *Store) ListAccountsWithBalances() ([]AccountWithBalance, error) {
 	for rows.Next() {
 		var r AccountWithBalance
 		if err := rows.Scan(&r.ID, &r.Name, &r.Type, &r.IsActive, &r.CreatedAt,
-			&r.Balance, &r.Reserved, &r.AllowanceManaged, &r.MonthlyGrant, &r.FederatedEmail); err != nil {
+			&r.Balance, &r.Reserved, &r.AllowanceManaged, &r.MonthlyGrant, &r.FederatedEmail, &r.RateLimitPerMin); err != nil {
 			return nil, err
 		}
 		results = append(results, r)

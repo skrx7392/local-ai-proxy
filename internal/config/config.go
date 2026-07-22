@@ -64,6 +64,13 @@ type Config struct {
 	AuthRegisterPerMinIP  int
 	AuthGeneralPerMinIP   int
 	AuthBcryptConcurrency int
+
+	// Account-level chat rate limits (requests per minute), by account
+	// class; per-account override via accounts.rate_limit_per_min. There is
+	// no 0=disabled semantic — to effectively disable, set the max. See
+	// docs/design/per-account-rate-limiting.md.
+	AccountRateLimitPerMin int // ACCOUNT_RATELIMIT_PER_MIN, service accounts
+	EndUserRateLimitPerMin int // END_USER_RATELIMIT_PER_MIN, allowance-managed accounts
 }
 
 func Load() (Config, error) {
@@ -163,6 +170,19 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// Account-level chat rate limits. Defaults: 300/min for service accounts
+	// (generous — existing multi-key accounts mostly don't break on day one,
+	// but finally bounded), 30/min for end users (Open WebUI fires 2–4
+	// upstream completions per visible message, so 30 ≈ 7–10 messages/min).
+	accountRateLimit, err := boundedIntEnvOrDefault("ACCOUNT_RATELIMIT_PER_MIN", 300, maxRateLimitPerMin)
+	if err != nil {
+		return Config{}, err
+	}
+	endUserRateLimit, err := boundedIntEnvOrDefault("END_USER_RATELIMIT_PER_MIN", 30, maxRateLimitPerMin)
+	if err != nil {
+		return Config{}, err
+	}
+
 	// Track explicit presence of OLLAMA_URL (empty counts as unset, matching
 	// the rest of the config): node synthesis must distinguish "operator
 	// pointed us at an Ollama" from "nothing configured", so it keys off
@@ -221,7 +241,26 @@ func Load() (Config, error) {
 		AuthRegisterPerMinIP:  authRegisterIP,
 		AuthGeneralPerMinIP:   authGeneralIP,
 		AuthBcryptConcurrency: bcryptConcurrency,
+
+		AccountRateLimitPerMin: accountRateLimit,
+		EndUserRateLimitPerMin: endUserRateLimit,
 	}, nil
+}
+
+// maxRateLimitPerMin mirrors ratelimit.MaxConfigPerMinute (typo guard) —
+// duplicated here to keep config free of the ratelimit package's HTTP deps.
+const maxRateLimitPerMin = 10000
+
+// boundedIntEnvOrDefault is intEnvOrDefault with an upper bound.
+func boundedIntEnvOrDefault(key string, fallback, max int) (int, error) {
+	n, err := intEnvOrDefault(key, fallback)
+	if err != nil {
+		return 0, err
+	}
+	if n > max {
+		return 0, fmt.Errorf("invalid %s: must be <= %d, got %d", key, max, n)
+	}
+	return n, nil
 }
 
 // intEnvOrDefault parses a positive integer env var, returning fallback when

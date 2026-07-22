@@ -284,6 +284,16 @@ EXCEPTION WHEN duplicate_column THEN
     NULL;
 END $$;
 
+-- Per-account request rate limit override (requests/minute). NULL = class
+-- env default: END_USER_RATELIMIT_PER_MIN for allowance-managed accounts,
+-- ACCOUNT_RATELIMIT_PER_MIN otherwise. Named to avoid colliding with
+-- api_keys.rate_limit inside joins. See docs/design/per-account-rate-limiting.md.
+DO $$ BEGIN
+    ALTER TABLE accounts ADD COLUMN rate_limit_per_min INTEGER;
+EXCEPTION WHEN duplicate_column THEN
+    NULL;
+END $$;
+
 -- First day (UTC) of the month the allowance was last granted for.
 DO $$ BEGIN
     ALTER TABLE credit_balances ADD COLUMN allowance_period DATE;

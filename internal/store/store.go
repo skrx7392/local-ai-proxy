@@ -62,6 +62,13 @@ type APIKey struct {
 	SessionTokenLimit *int       // nil = no session limit
 	LastUsedAt        *time.Time // nil = key has never served a request; derived from usage_logs
 	TrustUserHeaders  bool       // bill the forwarded end-user identity instead of the key's account
+	// AccountRateLimitPerMin is the key's account rate_limit_per_min override;
+	// nil = class env default (or no account). Populated by GetKeyByHash only.
+	AccountRateLimitPerMin *int
+	// AccountAllowanceManaged is the key's account allowance_managed flag —
+	// a key created directly on an end-user account must keep that account's
+	// limiter class and 402 semantics. Populated by GetKeyByHash only.
+	AccountAllowanceManaged bool
 }
 
 type Account struct {
@@ -308,10 +315,15 @@ func (s *Store) GetKeyByHash(hash string) (*APIKey, error) {
 	var apiKey APIKey
 	err := s.pool.QueryRow(
 		context.Background(),
-		`SELECT id, name, key_hash, key_prefix, rate_limit, created_at, revoked, user_id, account_id, session_token_limit, trust_user_headers
-		 FROM api_keys WHERE key_hash = $1 AND revoked = FALSE`, hash,
+		`SELECT k.id, k.name, k.key_hash, k.key_prefix, k.rate_limit, k.created_at, k.revoked,
+		        k.user_id, k.account_id, k.session_token_limit, k.trust_user_headers,
+		        a.rate_limit_per_min, COALESCE(a.allowance_managed, FALSE)
+		 FROM api_keys k
+		 LEFT JOIN accounts a ON a.id = k.account_id
+		 WHERE k.key_hash = $1 AND k.revoked = FALSE`, hash,
 	).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.RateLimit, &apiKey.CreatedAt, &apiKey.Revoked,
-		&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.TrustUserHeaders)
+		&apiKey.UserID, &apiKey.AccountID, &apiKey.SessionTokenLimit, &apiKey.TrustUserHeaders,
+		&apiKey.AccountRateLimitPerMin, &apiKey.AccountAllowanceManaged)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

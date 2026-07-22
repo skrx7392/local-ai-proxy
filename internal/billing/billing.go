@@ -36,6 +36,10 @@ const SourceOpenWebUI = "openwebui"
 type Resolution struct {
 	AccountID        int64
 	AllowanceManaged bool // true for auto-provisioned end-user accounts (drives 402 wording)
+	// RateLimitPerMin is the billing account's rate_limit_per_min override;
+	// nil = class env default. Carried here so the rate limiter (which runs
+	// right after billing) needs no extra DB read.
+	RateLimitPerMin *int
 }
 
 type ctxKey struct{}
@@ -83,13 +87,21 @@ func Middleware(db *store.Store, defaultGrant float64) func(http.Handler) http.H
 					next.ServeHTTP(w, r.WithContext(WithResolution(r.Context(), Resolution{
 						AccountID:        res.AccountID,
 						AllowanceManaged: true,
+						RateLimitPerMin:  res.RateLimitPerMin,
 					})))
 					return
 				}
 			}
 
 			if key.AccountID != nil {
-				r = r.WithContext(WithResolution(r.Context(), Resolution{AccountID: *key.AccountID}))
+				// AllowanceManaged comes from the ACCOUNT, not the identity
+				// path: a key created directly on an end-user account keeps
+				// that account's limiter class and 402 semantics.
+				r = r.WithContext(WithResolution(r.Context(), Resolution{
+					AccountID:        *key.AccountID,
+					AllowanceManaged: key.AccountAllowanceManaged,
+					RateLimitPerMin:  key.AccountRateLimitPerMin,
+				}))
 			}
 			next.ServeHTTP(w, r)
 		})

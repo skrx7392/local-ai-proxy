@@ -30,6 +30,8 @@ type ConfigSnapshot struct {
 	AuthRegisterRateLimitPerMinute   int     `json:"auth_register_rate_limit_per_minute"`
 	AuthGeneralRateLimitPerMinute    int     `json:"auth_general_rate_limit_per_minute"`
 	AuthBcryptMaxConcurrent          int     `json:"auth_bcrypt_max_concurrent"`
+	AccountRateLimitPerMinute        int     `json:"account_rate_limit_per_minute"`
+	EndUserRateLimitPerMinute        int     `json:"end_user_rate_limit_per_minute"`
 	UsageChannelCapacity             int     `json:"usage_channel_capacity"`
 	AdminSessionDurationHrs          int     `json:"admin_session_duration_hours"`
 	UserSessionDurationHrs           int     `json:"user_session_duration_hours"`
