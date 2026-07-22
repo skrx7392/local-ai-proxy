@@ -44,7 +44,7 @@ func newMiddleware(limits Limits, m *metrics.Metrics) (http.Handler, *Limiter, *
 	clock := newTestClock()
 	keys := NewWithClock(clock.now)
 	accounts := NewWithClock(clock.now)
-	return Middleware(keys, accounts, limits, m)(okNext()), keys, accounts
+	return Middleware(keys, accounts, NewConcurrency(), limits, m)(okNext()), keys, accounts
 }
 
 func TestMiddleware_NoKeyInContext(t *testing.T) {

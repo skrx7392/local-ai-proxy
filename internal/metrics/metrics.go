@@ -32,6 +32,9 @@ type Metrics struct {
 	// Infrastructure
 	OllamaUp prometheus.Gauge
 	NodeUp   *prometheus.GaugeVec // labels: node — per-node probe health (1=up, 0=down)
+	// StreamsInflight counts non-GET /api/v1/ requests currently holding a
+	// concurrency slot — "is GPU occupancy saturated right now".
+	StreamsInflight prometheus.Gauge
 
 	// Sweeper
 	SweeperRuns  *prometheus.CounterVec // labels: operation (stale_holds|settled_cleanup), outcome (success|error)
@@ -115,6 +118,11 @@ func New(usageChLen func() int) *Metrics {
 			Help: "Whether a backend node is healthy per its last probe (1=up, 0=down), by node name.",
 		}, []string{"node"}),
 
+		StreamsInflight: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "aiproxy_streams_inflight",
+			Help: "Non-GET proxy requests currently holding a per-account concurrency slot.",
+		}),
+
 		SweeperRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "aiproxy_credit_sweeper_runs_total",
 			Help: "Credit-hold sweeper tick invocations by operation and outcome.",
@@ -157,6 +165,7 @@ func New(usageChLen func() int) *Metrics {
 		m.UsageDrops,
 		m.OllamaUp,
 		m.NodeUp,
+		m.StreamsInflight,
 		m.SweeperRuns,
 		m.SweeperSwept,
 		m.Registrations,
@@ -203,6 +212,22 @@ func (m *Metrics) RecordCreditGateReject() {
 		return
 	}
 	m.CreditGateRejects.Inc()
+}
+
+// RecordStreamStart marks a concurrency slot acquired. Nil-safe.
+func (m *Metrics) RecordStreamStart() {
+	if m == nil {
+		return
+	}
+	m.StreamsInflight.Inc()
+}
+
+// RecordStreamEnd marks a concurrency slot released. Nil-safe.
+func (m *Metrics) RecordStreamEnd() {
+	if m == nil {
+		return
+	}
+	m.StreamsInflight.Dec()
 }
 
 // RecordAccountRateLimitReject increments the account-level limiter reject
