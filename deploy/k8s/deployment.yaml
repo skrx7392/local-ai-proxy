@@ -69,6 +69,13 @@ spec:
               value: "300"
             - name: END_USER_RATELIMIT_PER_MIN
               value: "30"
+            # In-flight non-GET caps — bound GPU occupancy, which req/min
+            # cannot. 5 end-user: one visible chat message = 1 visible stream
+            # + 2–4 background completions, so 3 can trip on a single send.
+            - name: ACCOUNT_MAX_CONCURRENT
+              value: "8"
+            - name: END_USER_MAX_CONCURRENT
+              value: "5"
           livenessProbe:
             httpGet:
               path: /api/healthz/live

@@ -212,15 +212,18 @@ func main() {
 	// (docs/design/per-account-rate-limiting.md §3.1).
 	keyLimiter := ratelimit.New()
 	accountLimiter := ratelimit.New()
+	concurrency := ratelimit.NewConcurrency()
 	capHits := creditrequest.New(db, cfg.CreditAlertWebhookURL, cfg.EndUserMonthlyGrant)
 	proxyHandler := proxy.NewHandler(reg, usageCh, cfg.MaxRequestBody, db, m,
 		proxy.Options{ModelsListAll: cfg.ModelsListAll, CapHits: capHits})
 	authMiddleware := auth.Middleware(db)
 	billingResolver := billing.Middleware(db, cfg.EndUserMonthlyGrant)
 	creditGate := credits.CreditGate(db, m, capHits)
-	rateLimitMiddleware := ratelimit.Middleware(keyLimiter, accountLimiter, ratelimit.Limits{
-		EndUserPerMin: cfg.EndUserRateLimitPerMin,
-		ServicePerMin: cfg.AccountRateLimitPerMin,
+	rateLimitMiddleware := ratelimit.Middleware(keyLimiter, accountLimiter, concurrency, ratelimit.Limits{
+		EndUserPerMin:        cfg.EndUserRateLimitPerMin,
+		ServicePerMin:        cfg.AccountRateLimitPerMin,
+		EndUserMaxConcurrent: cfg.EndUserMaxConcurrent,
+		ServiceMaxConcurrent: cfg.AccountMaxConcurrent,
 	}, m)
 	cors := middleware.CORS(cfg.CORSOrigins)
 
@@ -260,6 +263,8 @@ func main() {
 		AuthBcryptMaxConcurrent:          cfg.AuthBcryptConcurrency,
 		AccountRateLimitPerMinute:        cfg.AccountRateLimitPerMin,
 		EndUserRateLimitPerMinute:        cfg.EndUserRateLimitPerMin,
+		AccountMaxConcurrent:             cfg.AccountMaxConcurrent,
+		EndUserMaxConcurrent:             cfg.EndUserMaxConcurrent,
 		UsageChannelCapacity:             usageChannelCapacity,
 		AdminSessionDurationHrs:          int(user.AdminSessionDuration / time.Hour),
 		UserSessionDurationHrs:           int(user.UserSessionDuration / time.Hour),

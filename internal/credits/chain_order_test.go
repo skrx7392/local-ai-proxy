@@ -28,7 +28,7 @@ func buildChain(db *store.Store, capHits *creditrequest.Recorder, limits ratelim
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	rl := ratelimit.Middleware(keys, accounts, limits, nil)
+	rl := ratelimit.Middleware(keys, accounts, ratelimit.NewConcurrency(), limits, nil)
 	gate := CreditGate(db, nil, capHits)
 	return billing.Middleware(db, 0)(rl(gate(next)))
 }

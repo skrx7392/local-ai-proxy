@@ -71,6 +71,11 @@ type Config struct {
 	// docs/design/per-account-rate-limiting.md.
 	AccountRateLimitPerMin int // ACCOUNT_RATELIMIT_PER_MIN, service accounts
 	EndUserRateLimitPerMin int // END_USER_RATELIMIT_PER_MIN, allowance-managed accounts
+
+	// Per-account caps on in-flight non-GET requests (the control that
+	// bounds GPU occupancy; requests/min only bounds arrival rate).
+	AccountMaxConcurrent int // ACCOUNT_MAX_CONCURRENT, service accounts
+	EndUserMaxConcurrent int // END_USER_MAX_CONCURRENT, allowance-managed accounts
 }
 
 func Load() (Config, error) {
@@ -182,6 +187,17 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// Concurrency caps: 5 for end users (one visible Open WebUI message =
+	// 1 visible stream + 2–4 parallel background completions, so 3 can trip
+	// on a single send), 8 for service accounts.
+	accountMaxConcurrent, err := boundedIntEnvOrDefault("ACCOUNT_MAX_CONCURRENT", 8, maxConcurrentCap)
+	if err != nil {
+		return Config{}, err
+	}
+	endUserMaxConcurrent, err := boundedIntEnvOrDefault("END_USER_MAX_CONCURRENT", 5, maxConcurrentCap)
+	if err != nil {
+		return Config{}, err
+	}
 
 	// Track explicit presence of OLLAMA_URL (empty counts as unset, matching
 	// the rest of the config): node synthesis must distinguish "operator
@@ -244,12 +260,17 @@ func Load() (Config, error) {
 
 		AccountRateLimitPerMin: accountRateLimit,
 		EndUserRateLimitPerMin: endUserRateLimit,
+		AccountMaxConcurrent:   accountMaxConcurrent,
+		EndUserMaxConcurrent:   endUserMaxConcurrent,
 	}, nil
 }
 
 // maxRateLimitPerMin mirrors ratelimit.MaxConfigPerMinute (typo guard) —
 // duplicated here to keep config free of the ratelimit package's HTTP deps.
 const maxRateLimitPerMin = 10000
+
+// maxConcurrentCap bounds the per-account concurrency caps (typo guard).
+const maxConcurrentCap = 100
 
 // boundedIntEnvOrDefault is intEnvOrDefault with an upper bound.
 func boundedIntEnvOrDefault(key string, fallback, max int) (int, error) {
