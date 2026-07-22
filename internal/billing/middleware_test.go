@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/krishna/local-ai-proxy/internal/auth"
 	"github.com/krishna/local-ai-proxy/internal/store"
@@ -184,6 +185,30 @@ func TestMiddleware_ThreadsRateLimitOverride_ServiceAccount(t *testing.T) {
 	res, _ := serve(t, db, key, nil)
 	if res == nil || res.RateLimitPerMin == nil || *res.RateLimitPerMin != 99 {
 		t.Errorf("expected override 99 on service resolution, got %+v", res)
+	}
+}
+
+// A direct key on an allowance-managed account keeps that account's class:
+// end-user limiter default and monthly-limit 402 semantics, not service ones.
+func TestMiddleware_DirectKeyOnEndUserAccount_KeepsClass(t *testing.T) {
+	db := setupBillingTest(t)
+	res, err := db.ResolveEndUserAccount(store.FederatedIdentity{
+		Source: "openwebui", ExternalID: "direct-key-eua", Email: "direct@example.com",
+	}, 5.0, time.Now())
+	if err != nil {
+		t.Fatalf("ResolveEndUserAccount: %v", err)
+	}
+	key := &store.APIKey{ID: 1, AccountID: &res.AccountID, AccountAllowanceManaged: true}
+
+	billed, rec := serve(t, db, key, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if billed == nil || billed.AccountID != res.AccountID {
+		t.Fatalf("expected key-account billing, got %+v", billed)
+	}
+	if !billed.AllowanceManaged {
+		t.Error("direct key on an end-user account must keep AllowanceManaged=true")
 	}
 }
 

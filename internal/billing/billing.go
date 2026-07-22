@@ -94,9 +94,13 @@ func Middleware(db *store.Store, defaultGrant float64) func(http.Handler) http.H
 			}
 
 			if key.AccountID != nil {
+				// AllowanceManaged comes from the ACCOUNT, not the identity
+				// path: a key created directly on an end-user account keeps
+				// that account's limiter class and 402 semantics.
 				r = r.WithContext(WithResolution(r.Context(), Resolution{
-					AccountID:       *key.AccountID,
-					RateLimitPerMin: key.AccountRateLimitPerMin,
+					AccountID:        *key.AccountID,
+					AllowanceManaged: key.AccountAllowanceManaged,
+					RateLimitPerMin:  key.AccountRateLimitPerMin,
 				}))
 			}
 			next.ServeHTTP(w, r)

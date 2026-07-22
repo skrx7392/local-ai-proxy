@@ -83,6 +83,30 @@ func TestGetKeyByHash_IncludesAccountRateLimit(t *testing.T) {
 	}
 }
 
+// A key created directly on an allowance-managed account must carry the
+// account's class so the limiter and 402 wording don't silently degrade to
+// service semantics (codex review finding on PR #65).
+func TestGetKeyByHash_CarriesAllowanceManaged(t *testing.T) {
+	s := setupTestStore(t)
+	res, err := s.ResolveEndUserAccount(FederatedIdentity{
+		Source: "openwebui", ExternalID: "rl-direct", Email: "rl-direct@example.com",
+	}, 5.0, time.Now())
+	if err != nil {
+		t.Fatalf("ResolveEndUserAccount: %v", err)
+	}
+	if _, err := s.CreateKeyForAccountOnly(res.AccountID, "direct-eua-key", "hash-rl-direct", "laip_dr", 60); err != nil {
+		t.Fatalf("CreateKeyForAccountOnly: %v", err)
+	}
+
+	key, err := s.GetKeyByHash("hash-rl-direct")
+	if err != nil || key == nil {
+		t.Fatalf("GetKeyByHash: %v, %v", key, err)
+	}
+	if !key.AccountAllowanceManaged {
+		t.Error("key on an allowance-managed account must report AccountAllowanceManaged=true")
+	}
+}
+
 func TestGetKeyByHash_LegacyKeyWithoutAccount(t *testing.T) {
 	s := setupTestStore(t)
 	if _, err := s.CreateKey("legacy-rl", "hash-legacy-rl", "laip_lg", 60); err != nil {
