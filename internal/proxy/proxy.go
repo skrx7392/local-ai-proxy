@@ -77,10 +77,55 @@ type handler struct {
 
 // requestMeta holds fields peeked from the request body.
 type requestMeta struct {
-	Model               string `json:"model"`
-	Stream              *bool  `json:"stream"`
-	MaxTokens           *int   `json:"max_tokens"`
-	MaxCompletionTokens *int   `json:"max_completion_tokens"`
+	Model               string             `json:"model"`
+	Stream              *bool              `json:"stream"`
+	MaxTokens           *int               `json:"max_tokens"`
+	MaxCompletionTokens *int               `json:"max_completion_tokens"`
+	StreamOptions       *streamOptionsMeta `json:"stream_options"`
+}
+
+// streamOptionsMeta peeks stream_options for the usage-injection decision.
+type streamOptionsMeta struct {
+	IncludeUsage *bool `json:"include_usage"`
+}
+
+// wantsStreamUsage reports whether the client itself asked for the final
+// stream usage chunk.
+func (m *requestMeta) wantsStreamUsage() bool {
+	return m.StreamOptions != nil && m.StreamOptions.IncludeUsage != nil && *m.StreamOptions.IncludeUsage
+}
+
+// injectStreamUsage returns body with stream_options.include_usage set to
+// true, preserving every other field untouched. OpenAI-compatible backends
+// only emit the final usage chunk when asked, and clients (Open WebUI 0.10)
+// commonly don't ask — without real token counts, streamed billing degrades
+// to the bytes-written estimate, inflated ~30-50x by SSE envelope overhead.
+// The synthetic chunk this provokes is stripped before relay (see
+// handleStreaming) so clients receive exactly the stream shape they
+// requested. On any marshalling failure the original body is returned with
+// ok=false and forwarding proceeds unmodified.
+func injectStreamUsage(body []byte) (out []byte, ok bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body, false
+	}
+	so := map[string]json.RawMessage{}
+	if raw, exists := m["stream_options"]; exists {
+		if err := json.Unmarshal(raw, &so); err != nil {
+			return body, false
+		}
+	}
+	so["include_usage"] = json.RawMessage("true")
+	soRaw, err := json.Marshal(so)
+	if err != nil {
+		return body, false
+	}
+	m["stream_options"] = soRaw
+	out, err = json.Marshal(m)
+	if err != nil {
+		return body, false
+	}
+	return out, true
 }
 
 // usageData is extracted from the backend's response for logging.
@@ -337,10 +382,16 @@ func (h *handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// (5) Forward
+	// (5) Forward. Streamed requests that didn't ask for usage get
+	// include_usage injected upstream (real token counts for billing); the
+	// provoked synthetic chunk is stripped before relay.
 	isStream := meta.Stream != nil && *meta.Stream
 	if isStream {
-		h.handleStreaming(w, r, body, meta.Model, node, key, bill, start, holdID, creditEnabled, pricing)
+		upBody, injectedUsage := body, false
+		if !meta.wantsStreamUsage() {
+			upBody, injectedUsage = injectStreamUsage(body)
+		}
+		h.handleStreaming(w, r, upBody, meta.Model, node, key, bill, start, holdID, creditEnabled, pricing, injectedUsage)
 	} else {
 		h.handleNonStreaming(w, r, body, meta.Model, node, key, bill, start, holdID, creditEnabled, pricing)
 	}
@@ -480,7 +531,7 @@ func (h *handler) handleNonStreaming(w http.ResponseWriter, r *http.Request, bod
 
 func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body []byte,
 	model string, node registry.Node, key *store.APIKey, bill billingInfo, start time.Time,
-	holdID int64, creditEnabled bool, pricing *store.CreditPricing) {
+	holdID int64, creditEnabled bool, pricing *store.CreditPricing, injectedUsage bool) {
 
 	nodeID := node.ID
 	flusher, ok := w.(http.Flusher)
@@ -551,17 +602,19 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 	for {
 		line, err := lineReader.ReadBytes('\n')
 		if len(line) > 0 {
-			w.Write(line)
-			flusher.Flush()
-			bytesWritten += len(line)
-
-			// Observe: look for usage in the line (non-destructive)
+			// Observe usage before relaying; a usage-only chunk (empty
+			// choices) that exists only because the proxy injected
+			// include_usage is captured and suppressed — the client never
+			// asked for it. Usage attached to a content-bearing chunk is
+			// always relayed.
+			suppress := false
 			trimmed := bytes.TrimSpace(line)
 			if bytes.HasPrefix(trimmed, []byte("data: ")) {
 				data := bytes.TrimPrefix(trimmed, []byte("data: "))
 				if !bytes.Equal(data, []byte("[DONE]")) {
 					var chunk struct {
-						Usage *struct {
+						Choices []json.RawMessage `json:"choices"`
+						Usage   *struct {
 							PromptTokens     int `json:"prompt_tokens"`
 							CompletionTokens int `json:"completion_tokens"`
 							TotalTokens      int `json:"total_tokens"`
@@ -571,8 +624,14 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 						ud.Usage.PromptTokens = chunk.Usage.PromptTokens
 						ud.Usage.CompletionTokens = chunk.Usage.CompletionTokens
 						ud.Usage.TotalTokens = chunk.Usage.TotalTokens
+						suppress = injectedUsage && len(chunk.Choices) == 0
 					}
 				}
+			}
+			if !suppress {
+				w.Write(line)
+				flusher.Flush()
+				bytesWritten += len(line)
 			}
 		}
 
