@@ -114,6 +114,9 @@ func injectStreamUsage(body []byte) (out []byte, ok bool) {
 		if err := json.Unmarshal(raw, &so); err != nil {
 			return body, false
 		}
+		if so == nil { // "stream_options": null unmarshals to a nil map
+			so = map[string]json.RawMessage{}
+		}
 	}
 	so["include_usage"] = json.RawMessage("true")
 	soRaw, err := json.Marshal(so)
@@ -609,8 +612,11 @@ func (h *handler) handleStreaming(w http.ResponseWriter, r *http.Request, body [
 			// always relayed.
 			suppress := false
 			trimmed := bytes.TrimSpace(line)
-			if bytes.HasPrefix(trimmed, []byte("data: ")) {
-				data := bytes.TrimPrefix(trimmed, []byte("data: "))
+			if bytes.HasPrefix(trimmed, []byte("data:")) {
+				// SSE: the space after the field colon is optional; strip
+				// at most one.
+				data := bytes.TrimPrefix(trimmed, []byte("data:"))
+				data = bytes.TrimPrefix(data, []byte(" "))
 				if !bytes.Equal(data, []byte("[DONE]")) {
 					var chunk struct {
 						Choices []json.RawMessage `json:"choices"`

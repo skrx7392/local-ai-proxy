@@ -215,6 +215,81 @@ func TestStreaming_PreservesOtherStreamOptions(t *testing.T) {
 	}
 }
 
+func TestStreaming_NullStreamOptionsInjectsWithoutPanic(t *testing.T) {
+	// "stream_options": null is valid JSON a client may send; unmarshalling
+	// null into the options map yields nil, which must not panic the
+	// injection path (codex P1).
+	upstream, lastBody := mockUsageAwareStreaming(t)
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(singleNodeRegistry(t, upstream.URL, "llama3:latest"), usageCh, 52428800, nil, nil, Options{})
+
+	rec, _ := streamRequest(t, h, map[string]any{
+		"model":          "llama3:latest",
+		"stream":         true,
+		"stream_options": nil,
+		"messages":       []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var up struct {
+		StreamOptions *struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	if err := json.Unmarshal(lastBody(), &up); err != nil {
+		t.Fatalf("parse upstream body: %v", err)
+	}
+	if up.StreamOptions == nil || !up.StreamOptions.IncludeUsage {
+		t.Errorf("expected include_usage injected over null stream_options, got %s", lastBody())
+	}
+	entry := waitUsage(t, usageCh)
+	if entry.TotalTokens != 15 {
+		t.Errorf("expected 15 total tokens, got %d", entry.TotalTokens)
+	}
+}
+
+func TestStreaming_SpacelessSSEDataFieldSuppressed(t *testing.T) {
+	// The SSE spec makes the space after "data:" optional; a usage-only
+	// chunk in that spelling must still be captured and suppressed
+	// (codex P2).
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data:%s\n\n", `{"id":"c1","choices":[{"delta":{"content":"Hi"}}]}`)
+		fmt.Fprintf(w, "data:%s\n\n", `{"id":"c1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+		fmt.Fprintf(w, "data:[DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	usageCh := make(chan store.UsageEntry, 10)
+	h := NewHandler(singleNodeRegistry(t, upstream.URL, "llama3:latest"), usageCh, 52428800, nil, nil, Options{})
+
+	rec, _ := streamRequest(t, h, map[string]any{
+		"model":    "llama3:latest",
+		"stream":   true,
+		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "prompt_tokens") {
+		t.Errorf("space-less synthetic usage chunk leaked to client: %s", body)
+	}
+	if !strings.Contains(body, `"content":"Hi"`) || !strings.Contains(body, "[DONE]") {
+		t.Errorf("expected content and [DONE] relayed, got %s", body)
+	}
+	entry := waitUsage(t, usageCh)
+	if entry.TotalTokens != 15 {
+		t.Errorf("expected 15 total tokens captured from space-less chunk, got %d", entry.TotalTokens)
+	}
+}
+
 func TestStreaming_UsageOnContentChunkNotSuppressed(t *testing.T) {
 	// Some backends attach usage to the final CONTENT chunk instead of a
 	// choices-empty synthetic one; that chunk carries data the client needs
