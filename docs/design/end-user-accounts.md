@@ -5,7 +5,7 @@ Author: Claude, reviewed by Krishna (pending)
 
 ## Problem
 
-All chat.ai.skpodduturi.dev traffic reaches the proxy on one shared OpenWebUI API key
+All chat-ai.skpodduturi.dev traffic reaches the proxy on one shared OpenWebUI API key
 billed to the `admin-service` account. Usage is a single undifferentiated blob: no
 per-user visibility in analytics, and no way to stop one end user from consuming the
 entire shared balance.
